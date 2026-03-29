@@ -8,6 +8,7 @@ pub mod hot_reload;
 pub mod protocol;
 pub mod upstream;
 pub mod sidecar;
+pub mod transform;
 pub mod util;
 
 use axum::{routing::get, Extension, Router};
