@@ -3,6 +3,7 @@
 mod config;
 pub mod auth;
 pub mod cache;
+pub mod circuit_breaker;
 pub mod hot_reload;
 pub mod protocol;
 pub mod upstream;
