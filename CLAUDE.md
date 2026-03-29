@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recast MCP is a hosted, no-code platform that exposes any REST API to AI agents (Claude, Cursor, ChatGPT) as a live MCP server. The full product spec lives in `docs/SUMMARY.md`.
 
-**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented, Woodpecker CI pipelines and Docker multi-stage builds in place, OpenTelemetry telemetry foundation wired into all services, health check endpoints live on all services.
+**Status:** Active development — EPIC-00 (project setup) and EPIC-01 (foundation services) substantially complete. Monorepo scaffolding, PostgreSQL schema migrations, shared Rust libraries, Woodpecker CI pipelines, Docker multi-stage builds, OpenTelemetry telemetry, health check endpoints, Clerk JWT auth, credential encryption (AES-256-GCM), CRUD APIs (servers, credentials, tokens), webhooks, SSRF protection, rate limiting (Redis + in-process fallback), credential injector sidecar, and audit logging are all implemented.
 
 ## Planned Architecture
 
@@ -125,7 +125,7 @@ All three Rust services initialize telemetry via `mcp_common::init_telemetry(ser
 
 - **Traces:** OTLP gRPC to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`). Set `OTEL_SDK_DISABLED=true` to disable.
 - **Logs:** Structured JSON on stdout with fields: `timestamp`, `level`, `service`, `version`, `message`, `trace_id` (inside spans), `span_id` (inside spans).
-- **Metrics:** Prometheus format at `/metrics` on each service. Uses `metrics` + `metrics-exporter-prometheus` crates. Record DB query durations as `db_query_duration_seconds` histogram.
+- **Metrics:** Prometheus format at `/metrics` on each service. Uses `metrics` + `metrics-exporter-prometheus` crates. Record DB query durations as `db_query_duration_seconds` histogram. The shared `mcp_common::track_metrics` middleware records `http_requests_total` and `http_request_duration_seconds` using `axum::extract::MatchedPath` for the `path` label (route template like `/v1/servers/:id`, not the raw URI) to prevent unbounded Prometheus cardinality.
 - **Local observability stack:** `docker compose up` starts OTEL Collector (ports 4317/4318) and Jaeger UI at `http://localhost:16686`.
 - **HTTP tracing:** `tower_http::trace::TraceLayer` creates a tracing span per HTTP request. Combined with the OTEL subscriber layer, these become OTEL spans automatically.
 - Crate versions: `opentelemetry 0.26`, `opentelemetry_sdk 0.26` (rt-tokio feature), `opentelemetry-otlp 0.26` (grpc-tonic feature), `tracing-opentelemetry 0.27`.
@@ -160,9 +160,27 @@ DB connectivity uses `sqlx::PgPool::connect_lazy` (non-blocking at startup). The
 
 docker-compose health checks use `/health/ready` (not `/health/live`) so `condition: service_healthy` verifies actual DB connectivity.
 
+## Auth (Platform API)
+
+JWT validation uses `jsonwebtoken = "9"` with RS256. Clerk JWKS is cached in `JwksCache` (5-min TTL, `Arc<RwLock<...>>`). Configuration:
+
+- `CLERK_JWKS_URL` (required) — full URL to Clerk's `/.well-known/jwks.json`
+- `CLERK_ISSUER` (optional) — expected `iss` claim; empty string skips iss validation
+- `CLERK_WEBHOOK_SECRET` (required) — Svix signing secret from Clerk dashboard. Format: `whsec_<base64>`. Used by `POST /v1/webhooks/clerk` to verify signatures before processing user lifecycle events.
+
+Auth middleware is applied via `route_layer` on `/v1/*` routes, not globally. This allows `/v1/webhooks/clerk` (TASK-017) to bypass auth by being in a separate `Router::new()` that is merged before the `route_layer` call.
+
+`JwksCache::new(url)` accepts any URL — point it at a `MockUpstream` in tests. The cache fetches on first call and on unknown `kid` (key rotation). Write lock is taken only on cache miss.
+
+Email must come from the JWT claims (Clerk session claims template must include `email`). The `sub` claim is the Clerk user ID.
+
+**Lib/bin split**: `services/api` has both `src/lib.rs` (for integration tests) and `src/main.rs` (entry point). Integration tests in `tests/` import from `mcp_api` (the lib target). The binary in `main.rs` also uses `use mcp_api::...` to avoid duplicated module trees.
+
+**Service-layer pattern:** Business logic and SQL queries live in service structs, not in handlers. `CredentialService` (`credentials.rs`) and `ServerService` (`servers.rs`) encapsulate database access, encryption, and audit logging behind clean interfaces. Handlers are thin HTTP-layer wrappers: extract request → call service → map to response. New resources should follow this pattern.
+
 ## Integration Tests
 
-Integration tests live in `services/{service}/tests/integration_tests.rs`. They require a live PostgreSQL instance.
+Integration tests live in `services/{service}/tests/integration_tests.rs` (and `tests/auth_tests.rs` for auth, `tests/webhook_tests.rs` for webhooks). They require a live PostgreSQL instance.
 
 ```
 TEST_DATABASE_URL=postgres://recast:recast@localhost:5432/postgres \
@@ -174,6 +192,40 @@ TEST_DATABASE_URL=postgres://recast:recast@localhost:5432/postgres \
 - Services activate the testing utilities via: `mcp-common = { ..., features = ["testing"] }` in `[dev-dependencies]`. The feature is never active in release builds.
 - Integration tests are **not** compiled by `cargo build` or `cargo clippy` without `--tests`. They have `#![allow(clippy::expect_used, ...)]` at the top since panicking on test-setup failure is intentional.
 - Seed file is at `migrations/seeds/seed_dev.sql` (subdirectory keeps it out of `sqlx::migrate!()` scans).
+- **Shared test helpers** live in `services/api/tests/helpers/mod.rs`. This module provides `TestRsaKey`, `make_jwt`, `make_jwt_with_offset`, `make_state_with_jwks`, and `TEST_ISSUER` — imported by auth, server, and credential endpoint tests via `mod helpers;`. New integration test files should use these shared fixtures instead of defining their own.
+
+## Module Structure
+
+### `libs/common/` (mcp-common)
+
+Shared library for all services. Key modules:
+- `error.rs` — `AppError` enum, `McpError`, `IntoResponse` impl, sanitized error messages
+- `audit.rs` — `AuditLogger` with batched async background writer
+- `rate_limit/mod.rs` — Token bucket rate limiter (Redis + in-process fallback), `rate_limit/lua.rs` contains the Redis Lua script
+- `ssrf.rs` — URL/IP validation against SSRF (blocklists, DNS resolution, CIDR checks)
+- `middleware.rs` — `track_metrics`, `metrics_handler`, `fallback_handler`, `request_id_middleware` (shared across all services)
+- `health.rs` — `/health/live` and `/health/ready` endpoint handlers
+- `config.rs` — Environment variable loading helpers, `FromEnv` trait
+- `telemetry.rs` — OpenTelemetry + tracing initialization
+- `testing/` — feature-gated (`testing`) test utilities: `TestDatabase`, `MockUpstream`, `TestMcpClient`
+
+### `services/api/` (mcp-api)
+
+Platform API service. Module layout:
+- `main.rs` — Startup lifecycle only: config, telemetry, pool, state assembly, serve loop, shutdown
+- `router.rs` — `build_router`, `build_cors`, `build_router_with_timeout`, route wiring
+- `shutdown.rs` — `shutdown_signal` (SIGTERM/SIGINT)
+- `app_state.rs` — `AppState` struct
+- `auth.rs` — Clerk JWT validation, `JwksCache` with 5-min TTL
+- `credentials.rs` — `CredentialService` (SQL + encryption + audit)
+- `servers.rs` — `ServerService` (SQL + slug generation + audit)
+- `handlers/` — Thin HTTP handlers organized by resource:
+  - `servers/mod.rs` — CRUD handlers + validation helpers
+  - `servers/types.rs` — Request/response DTOs, `ServerConfig`, pagination types
+  - `credentials.rs`, `tokens.rs`, `users.rs`, `webhooks.rs`
+- `middleware.rs` — API-specific middleware (auth layer wiring)
+- `config.rs` — `ApiConfig` (environment-validated)
+- `tests/helpers/mod.rs` — Shared test fixtures (RSA keys, JWT builders, state constructors)
 
 ## Build Sequence (When Code Exists)
 

@@ -7,8 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 aes-gcm = "0.10"
+hex = "0.4"
 rand = "0.8"
 thiserror = "1.0"
+zeroize = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

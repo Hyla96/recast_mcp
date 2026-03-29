@@ -2,63 +2,14 @@
 
 mod config;
 
-use axum::{
-    http::header,
-    response::IntoResponse,
-    routing::get,
-    Extension, Router,
-};
+use axum::{routing::get, Extension, Router};
 use config::Config;
 use mcp_common::{
     health::{live_handler, pg_pool_checker, ready_handler, HealthState},
-    init_telemetry, FromEnv,
+    init_telemetry, metrics_handler, track_metrics, FromEnv,
 };
-use metrics_exporter_prometheus::PrometheusHandle;
-use std::{net::SocketAddr, time::Instant};
+use std::net::SocketAddr;
 use tower_http::trace::TraceLayer;
-
-/// Axum middleware function that records `http_requests_total` and
-/// `http_request_duration_seconds` Prometheus metrics for every request.
-async fn track_metrics(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let start = Instant::now();
-
-    let response = next.run(req).await;
-
-    let duration = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-
-    metrics::counter!(
-        "http_requests_total",
-        "method" => method.clone(),
-        "status" => status,
-        "path" => path.clone()
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "http_request_duration_seconds",
-        "method" => method,
-        "path" => path
-    )
-    .record(duration);
-
-    response
-}
-
-/// Handler for `GET /metrics` — returns Prometheus-format metrics.
-async fn metrics_handler(
-    Extension(handle): Extension<PrometheusHandle>,
-) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        handle.render(),
-    )
-}
 
 #[tokio::main]
 async fn main() {

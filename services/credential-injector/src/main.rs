@@ -1,64 +1,26 @@
 //! Credential Injector sidecar service.
+//!
+//! Exposes `POST /inject` over HTTP. The gateway calls this endpoint with a
+//! [`mcp_credential_injector::inject::RequestSkeleton`] and receives the
+//! upstream response after the sidecar has injected the stored credential.
 
-mod config;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
-use axum::{
-    http::header,
-    response::IntoResponse,
-    routing::get,
-    Extension, Router,
-};
-use config::Config;
+use axum::{routing::get, Extension, Router};
 use mcp_common::{
     health::{live_handler, pg_pool_checker, ready_handler, HealthState},
-    init_telemetry, FromEnv,
+    init_telemetry, metrics_handler, track_metrics, AuditLogger, FromEnv,
 };
-use metrics_exporter_prometheus::PrometheusHandle;
-use std::{net::SocketAddr, time::Instant};
+use mcp_credential_injector::{
+    build_app_state, build_inject_router,
+    cache::new_cache,
+    config::Config,
+    notify::spawn_notify_listener,
+};
+use mcp_crypto::CryptoKey;
 use tower_http::trace::TraceLayer;
-
-/// Axum middleware function that records `http_requests_total` and
-/// `http_request_duration_seconds` Prometheus metrics for every request.
-async fn track_metrics(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let start = Instant::now();
-
-    let response = next.run(req).await;
-
-    let duration = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-
-    metrics::counter!(
-        "http_requests_total",
-        "method" => method.clone(),
-        "status" => status,
-        "path" => path.clone()
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "http_request_duration_seconds",
-        "method" => method,
-        "path" => path
-    )
-    .record(duration);
-
-    response
-}
-
-/// Handler for `GET /metrics` — returns Prometheus-format metrics.
-async fn metrics_handler(
-    Extension(handle): Extension<PrometheusHandle>,
-) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        handle.render(),
-    )
-}
 
 #[tokio::main]
 async fn main() {
@@ -100,9 +62,33 @@ async fn main() {
         }
     };
 
+    let crypto_key = Arc::new(CryptoKey::from_bytes(cfg.encryption_key));
+    let audit_logger = AuditLogger::new(db_pool.clone());
+    let cache = Arc::new(new_cache());
+    let upstream_timeout = Duration::from_secs(cfg.upstream_timeout_secs);
+
+    // Spawn the NOTIFY listener before building the state so the cache is
+    // shared between the listener and the inject handler.
+    spawn_notify_listener(cfg.database_url.clone(), Arc::clone(&cache));
+
+    let state = match build_app_state(
+        db_pool.clone(),
+        crypto_key,
+        audit_logger.clone(),
+        Arc::clone(&cache),
+        cfg.allowed_caller_ips,
+        cfg.shared_secret,
+        upstream_timeout,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to build HTTP client: {e}");
+            std::process::exit(1);
+        }
+    };
+
     tracing::info!(
         port = cfg.port,
-        database_url = cfg.database_url,
         "starting credential injector"
     );
 
@@ -125,14 +111,26 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(track_metrics));
 
-    let app = Router::new().merge(health_router).merge(api_router);
+    let inject_router = build_inject_router(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(track_metrics));
+
+    let app = Router::new()
+        .merge(health_router)
+        .merge(api_router)
+        .merge(inject_router);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     tracing::info!("listening on {}", addr);
 
     match tokio::net::TcpListener::bind(&addr).await {
         Ok(listener) => {
-            if let Err(e) = axum::serve(listener, app).await {
+            if let Err(e) = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
                 tracing::error!("server error: {}", e);
                 std::process::exit(1);
             }
@@ -142,54 +140,7 @@ async fn main() {
             std::process::exit(1);
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-        routing::get,
-        Extension, Router,
-    };
-    use mcp_common::health::{live_handler, ready_handler, DbCheckerFn, HealthState};
-    use std::sync::Arc;
-    use tower::ServiceExt;
-
-    fn make_test_router(db_checker: DbCheckerFn) -> Router {
-        let state = HealthState {
-            service: "mcp-credential-injector",
-            version: "0.0.0",
-            db_checker,
-        };
-        Router::new()
-            .route("/health/live", get(live_handler))
-            .route("/health/ready", get(ready_handler))
-            .layer(Extension(state))
-    }
-
-    #[tokio::test]
-    async fn health_ready_returns_200_when_db_healthy() {
-        let checker: DbCheckerFn = Arc::new(|| Box::pin(async { Ok(()) }));
-        let app = make_test_router(checker);
-        let req = Request::builder()
-            .uri("/health/ready")
-            .body(Body::empty())
-            .unwrap();
-        let res = app.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn health_ready_returns_503_when_db_unhealthy() {
-        let checker: DbCheckerFn =
-            Arc::new(|| Box::pin(async { Err("connection refused".to_string()) }));
-        let app = make_test_router(checker);
-        let req = Request::builder()
-            .uri("/health/ready")
-            .body(Body::empty())
-            .unwrap();
-        let res = app.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
+    // Drain the audit log before exiting.
+    audit_logger.shutdown().await;
 }

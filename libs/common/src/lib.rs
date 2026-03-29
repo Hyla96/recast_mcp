@@ -1,20 +1,27 @@
 //! Shared types and utilities for all services.
 
+pub mod audit;
 pub mod config;
 pub mod error;
 pub mod health;
 pub mod middleware;
+pub mod rate_limit;
+pub mod ssrf;
 pub mod telemetry;
 
 #[cfg(feature = "testing")]
 pub mod testing;
 
+pub use audit::{AuditAction, AuditEvent, AuditLogger};
 pub use config::{
     env_optional, env_optional_parsed, env_required, load_encryption_key, ConfigError,
     ConfigErrors,
 };
-pub use error::{AppError, ErrorDetails, ErrorResponse};
-pub use middleware::{request_id_middleware, RequestId};
+pub use error::{AppError, ErrorDetails, ErrorResponse, McpError, SanitizedErrorMsg};
+pub use middleware::{
+    fallback_handler, metrics_handler, request_id_middleware, track_metrics, RequestId,
+};
+pub use ssrf::{is_blocked_ip, validate_url, validate_url_with_dns};
 pub use telemetry::{init_telemetry, TelemetryError, TelemetryGuard};
 
 /// Trait for types that can be loaded from environment variables.

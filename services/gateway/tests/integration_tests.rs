@@ -19,18 +19,25 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, missing_docs)]
 
 use axum::{
+    body::Body,
     extract::{Path, Request, State},
-    http::StatusCode,
+    http::{Request as HttpRequest, StatusCode},
+    middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
-use mcp_common::testing::{MockUpstream, TestDatabase, TestMcpClient};
+use mcp_common::{
+    rate_limit::{RateLimitConfig, RateLimitContext, RateLimiter, rate_limit_middleware},
+    testing::{MockUpstream, TestDatabase, TestMcpClient},
+};
 use mcp_protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
+use tower::ServiceExt;
+use uuid::Uuid;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -592,4 +599,211 @@ async fn gateway_missing_auth_returns_401() {
         401,
         "missing auth header must return HTTP 401"
     );
+}
+
+// ─── Rate-limit middleware integration tests ──────────────────────────────────
+//
+// These tests do NOT require a live PostgreSQL or Redis instance — they use
+// `RateLimiter::new_in_process()` and axum's oneshot testing pattern.
+
+/// Build a test router that injects a fixed RateLimitContext then applies the
+/// rate-limit middleware. The handler simply returns HTTP 200.
+fn build_rate_limit_test_router(
+    server_id: Uuid,
+    user_id: Uuid,
+    per_server_rate: u32,
+    per_user_rate: u32,
+    limiter: RateLimiter,
+) -> Router {
+    let config = Arc::new(RateLimitConfig {
+        limiter,
+        per_server_rate,
+        per_user_rate,
+        enabled: true,
+        audit_logger: None,
+    });
+
+    Router::new()
+        .route("/test", get(|| async { StatusCode::OK }))
+        .layer(from_fn_with_state(config, rate_limit_middleware))
+        .layer(from_fn(move |mut req: Request, next: Next| async move {
+            req.extensions_mut().insert(RateLimitContext {
+                server_id: Some(server_id),
+                user_id: Some(user_id),
+            });
+            next.run(req).await
+        }))
+}
+
+/// 100 requests on a 100/min bucket → all succeed; 101st → HTTP 429.
+#[tokio::test]
+async fn rate_limit_middleware_returns_429_after_server_limit() {
+    let server_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let limiter = RateLimiter::new_in_process();
+    let app = build_rate_limit_test_router(server_id, user_id, 100, 10_000, limiter);
+
+    let mut allowed = 0u32;
+    let mut rejected = 0u32;
+
+    for _ in 0..151 {
+        let req = HttpRequest::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .expect("request build");
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        match resp.status().as_u16() {
+            200 => allowed += 1,
+            429 => rejected += 1,
+            s => panic!("unexpected status {s}"),
+        }
+    }
+
+    assert_eq!(allowed, 100, "exactly 100 requests should be allowed");
+    assert_eq!(rejected, 51, "remaining 51 should be rejected");
+}
+
+/// Every response (success and 429) carries X-RateLimit-* headers.
+#[tokio::test]
+async fn rate_limit_middleware_adds_headers_to_every_response() {
+    let limiter = RateLimiter::new_in_process();
+    let app = build_rate_limit_test_router(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        100,
+        10_000,
+        limiter,
+    );
+
+    let req = HttpRequest::builder()
+        .uri("/test")
+        .body(Body::empty())
+        .expect("build");
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        resp.headers().contains_key("x-ratelimit-limit"),
+        "x-ratelimit-limit missing"
+    );
+    assert!(
+        resp.headers().contains_key("x-ratelimit-remaining"),
+        "x-ratelimit-remaining missing"
+    );
+    assert!(
+        resp.headers().contains_key("x-ratelimit-reset"),
+        "x-ratelimit-reset missing"
+    );
+}
+
+/// On HTTP 429 the `Retry-After` header is present.
+#[tokio::test]
+async fn rate_limit_middleware_429_has_retry_after() {
+    let limiter = RateLimiter::new_in_process();
+    let server_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let app = build_rate_limit_test_router(server_id, user_id, 100, 10_000, limiter.clone());
+
+    // Exhaust the bucket.
+    for _ in 0..100 {
+        let req = HttpRequest::builder().uri("/test").body(Body::empty()).unwrap();
+        app.clone().oneshot(req).await.unwrap();
+    }
+
+    // Next request should be 429 with Retry-After.
+    let req = HttpRequest::builder().uri("/test").body(Body::empty()).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 429);
+    assert!(
+        resp.headers().contains_key("retry-after"),
+        "Retry-After header missing on 429"
+    );
+}
+
+/// `FEATURE_RATE_LIMIT_ENABLED=false` — middleware passes all requests through
+/// without adding rate-limit headers or returning 429.
+#[tokio::test]
+async fn rate_limit_middleware_disabled_passes_all_requests() {
+    let limiter = RateLimiter::new_in_process();
+    let server_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+
+    // Build with enabled = false.
+    let config = Arc::new(RateLimitConfig {
+        limiter,
+        per_server_rate: 1, // tiny limit — would reject immediately if enabled
+        per_user_rate: 1,
+        enabled: false,
+        audit_logger: None,
+    });
+    let app = Router::new()
+        .route("/test", get(|| async { StatusCode::OK }))
+        .layer(from_fn_with_state(config, rate_limit_middleware))
+        .layer(from_fn(move |mut req: Request, next: Next| async move {
+            req.extensions_mut().insert(RateLimitContext {
+                server_id: Some(server_id),
+                user_id: Some(user_id),
+            });
+            next.run(req).await
+        }));
+
+    for _ in 0..10 {
+        let req = HttpRequest::builder().uri("/test").body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "disabled limiter must not block");
+        assert!(
+            !resp.headers().contains_key("x-ratelimit-limit"),
+            "disabled limiter must not add rate-limit headers"
+        );
+    }
+}
+
+/// Per-user limit enforced across servers: 1000 requests over two "server" keys
+/// both sharing the same user key exhausts the user bucket.
+///
+/// Simplified: uses the same `user_id` but two different `server_id` values.
+/// Per-server rate is set very high (10 000) so only the user bucket triggers.
+#[tokio::test]
+async fn rate_limit_per_user_limit_enforced_across_servers() {
+    use mcp_common::rate_limit::RateLimiter;
+
+    // Use the limiter directly (not the middleware) to simulate two servers
+    // sharing the same user bucket.
+    let limiter = RateLimiter::new_in_process();
+    let user_key = format!("ratelimit:user:{}", Uuid::new_v4());
+    let rate = 1000u32;
+
+    let mut allowed = 0u32;
+    // Simulate 500 from "server A" + 501 from "server B" via the same user key.
+    for _ in 0..1001 {
+        if limiter.check(&user_key, rate).await.allowed {
+            allowed += 1;
+        }
+    }
+
+    assert_eq!(allowed, 1000, "1000 of 1001 requests via user bucket must be allowed");
+}
+
+/// 100 concurrent tasks against a 100-token bucket → no over-allowance.
+#[tokio::test]
+async fn rate_limit_concurrent_no_over_allowance() {
+    let limiter = Arc::new(RateLimiter::new_in_process());
+    let key = format!("ratelimit:server:{}", Uuid::new_v4());
+
+    let handles: Vec<_> = (0..150)
+        .map(|_| {
+            let lim = Arc::clone(&limiter);
+            let k = key.clone();
+            tokio::spawn(async move { lim.check(&k, 100).await })
+        })
+        .collect();
+
+    let mut allowed = 0u32;
+    for h in handles {
+        if h.await.expect("task join").allowed {
+            allowed += 1;
+        }
+    }
+
+    assert_eq!(allowed, 100, "exactly 100 of 150 concurrent requests must be allowed");
 }

@@ -37,6 +37,17 @@ pub struct Config {
     /// Maximum MCP tool calls per minute per user (token-bucket rate limit).
     /// Set via `RATE_LIMIT_CALLS_PER_MIN_PER_USER` (default: `1000`).
     pub rate_limit_calls_per_min_per_user: u32,
+
+    /// Redis connection URL for rate-limit token buckets.
+    /// Set via `REDIS_URL` (default: `redis://127.0.0.1:6379`).
+    /// When Redis is unreachable, the gateway falls back to in-process buckets.
+    pub redis_url: String,
+
+    /// Enable the rate-limit middleware.
+    /// Set via `FEATURE_RATE_LIMIT_ENABLED` (default: `true`).
+    /// Set to `false` to disable entirely; no `X-RateLimit-*` headers are
+    /// added when disabled.
+    pub feature_rate_limit_enabled: bool,
 }
 
 impl FromEnv for Config {
@@ -62,6 +73,10 @@ impl FromEnv for Config {
         // ── Optional (string) ─────────────────────────────────────────────────
         let injector_socket_path =
             env_optional("INJECTOR_SOCKET_PATH", "/tmp/recast-injector.sock");
+        let redis_url = env_optional("REDIS_URL", "redis://127.0.0.1:6379");
+
+        let feature_rate_limit_enabled: bool =
+            env_optional_parsed(&mut errors, "FEATURE_RATE_LIMIT_ENABLED", true);
 
         if !errors.is_empty() {
             return Err(errors);
@@ -76,6 +91,8 @@ impl FromEnv for Config {
                 upstream_timeout_secs,
                 rate_limit_calls_per_min_per_server,
                 rate_limit_calls_per_min_per_user,
+                redis_url,
+                feature_rate_limit_enabled,
             }),
             // Logically unreachable: env_required pushes an error and returns None
             // whenever the variable is absent, so errors would be non-empty above.

@@ -57,6 +57,19 @@ services:
       retries: 12
       start_period: 5s
 
+  # ─── Redis (rate-limit token-bucket store) ───────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   # ─── Gateway (MCP proxy, port 3000) ─────────────────────────────────────────
   gateway:
     build:
@@ -71,12 +84,15 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-recast}:${POSTGRES_PASSWORD:-recast}@db:5432/${POSTGRES_DB:-recast_mcp}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      REDIS_URL: redis://redis:6379
       RUST_LOG: ${RUST_LOG:-info}
       SQLX_OFFLINE: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       otel-collector:
         condition: service_started
