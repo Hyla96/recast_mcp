@@ -9,7 +9,7 @@ async fn main() {
 
     let app = Router::new().route("/health/live", get(|| async { "ok" }));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3002));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3002));
     tracing::info!("listening on {}", addr);
 
     match tokio::net::TcpListener::bind(&addr).await {

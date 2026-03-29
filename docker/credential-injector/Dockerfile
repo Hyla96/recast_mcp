@@ -45,7 +45,7 @@ RUN SQLX_OFFLINE=true cargo build --release -p mcp-credential-injector
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/mcp-credential-injector /usr/local/bin/mcp-credential-injector

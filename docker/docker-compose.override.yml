@@ -1,0 +1,81 @@
+# Recast MCP — developer overrides for hot-reload local development.
+#
+# This file overrides the base docker-compose.yml with:
+#  - Rust services replaced by lightweight dev images running cargo-watch
+#  - Source code bind-mounted into containers for instant recompile
+#  - Per-service named volumes for cargo build caches (survive container restart)
+#  - A Vite dev server (web) added for the React frontend with HMR
+#
+# Usage (from repo root):
+#   docker compose -f docker-compose.yml -f docker/docker-compose.override.yml up
+# Or: make dev
+#
+# Note: relative paths in this file are resolved relative to this file's
+# directory (docker/). The project root is referenced as ../ .
+
+services:
+  # ─── Gateway — cargo-watch hot reload ────────────────────────────────────────
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev-rust
+    volumes:
+      - ..:/app
+      - cargo-target-gateway:/tmp/target-gateway
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      CARGO_TARGET_DIR: /tmp/target-gateway
+      SQLX_OFFLINE: "true"
+    # Override the release binary entrypoint with cargo-watch
+    command: cargo watch -q -x "run -p recast-gateway"
+
+  # ─── Platform API — cargo-watch hot reload ────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev-rust
+    volumes:
+      - ..:/app
+      - cargo-target-api:/tmp/target-api
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      CARGO_TARGET_DIR: /tmp/target-api
+      SQLX_OFFLINE: "true"
+    command: cargo watch -q -x "run -p recast-api"
+
+  # ─── Credential Injector — cargo-watch hot reload ────────────────────────────
+  credential-injector:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev-rust
+    volumes:
+      - ..:/app
+      - cargo-target-injector:/tmp/target-injector
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      CARGO_TARGET_DIR: /tmp/target-injector
+      SQLX_OFFLINE: "true"
+    command: cargo watch -q -x "run -p recast-credential-injector"
+
+  # ─── React frontend — Vite dev server with HMR (port 5173) ───────────────────
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev-web
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../apps/web:/app
+      - web-node-modules:/app/node_modules
+    environment:
+      VITE_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}
+    # Install deps if node_modules volume is empty, then start Vite dev server.
+    # The node_modules named volume persists across restarts — install is fast after first run.
+    command: sh -c "pnpm install && pnpm dev --host 0.0.0.0"
+
+volumes:
+  cargo-target-gateway:
+  cargo-target-api:
+  cargo-target-injector:
+  cargo-registry:
+  web-node-modules:

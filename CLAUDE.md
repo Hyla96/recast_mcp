@@ -57,6 +57,29 @@ Run `just` to see all available recipes. Key ones:
 | `just db-prepare` | Generate .sqlx/ offline cache (needs DATABASE_URL) |
 | `just clean` | Remove build artifacts |
 
+### Docker Compose (local dev environment)
+
+| Command | Description |
+|---------|-------------|
+| `make dev` | Start all services with hot reload (cargo-watch + Vite HMR) |
+| `make down` | Stop all containers (volumes preserved) |
+| `make logs` | Tail logs from all services |
+| `make db-migrate` | Run sqlx migrations against localhost:5432 |
+| `make db-reset` | Drop/recreate db, migrate, seed |
+| `docker compose down -v` | Stop and remove all containers and volumes |
+
+The `make dev` command merges `docker-compose.yml` (base production topology) and
+`docker/docker-compose.override.yml` (dev hot-reload overrides with cargo-watch and Vite).
+
+Copy `.env.example` → `.env` before running `make dev`. The `.env` file is git-ignored.
+
+Port map (host):
+- PostgreSQL: `localhost:5432`
+- Gateway: `localhost:3000`
+- Platform API: `localhost:3001`
+- Credential Injector: `localhost:3002`
+- React dev server: `localhost:5173`
+
 ## Database
 
 - Migrations live in `migrations/` using timestamp-prefixed filenames (`YYYYMMDDHHMMSS_name.sql`).

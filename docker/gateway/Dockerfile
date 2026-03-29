@@ -47,7 +47,7 @@ RUN SQLX_OFFLINE=true cargo build --release -p mcp-gateway
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/mcp-gateway /usr/local/bin/mcp-gateway
