@@ -5,6 +5,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+## Enables test-support utilities: `TestDatabase`, `MockUpstream`, `TestMcpClient`.
+## Never activated in production builds — only via dev-dependencies with features = ["testing"].
+testing = [
+    "dep:reqwest",
+    "dep:mcp-protocol",
+    "dep:uuid",
+    "tokio/full",
+]
+
 [dependencies]
 axum = "0.7"
 hex = "0.4"
@@ -22,6 +32,11 @@ opentelemetry-semantic-conventions = { workspace = true }
 sqlx = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# Optional — activated only by the `testing` feature.
+reqwest = { version = "0.12", features = ["json"], optional = true }
+mcp-protocol = { path = "../mcp-protocol", optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

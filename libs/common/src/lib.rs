@@ -6,6 +6,9 @@ pub mod health;
 pub mod middleware;
 pub mod telemetry;
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 pub use config::{
     env_optional, env_optional_parsed, env_required, load_encryption_key, ConfigError,
     ConfigErrors,

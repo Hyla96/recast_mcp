@@ -37,4 +37,4 @@ db-reset:
 	$(COMPOSE_BASE) exec db psql -U $(POSTGRES_USER) postgres \
 	  -c "CREATE DATABASE $(POSTGRES_DB);"
 	DATABASE_URL="$(DATABASE_URL)" cargo sqlx migrate run
-	DATABASE_URL="$(DATABASE_URL)" psql -f migrations/seed_dev.sql
+	DATABASE_URL="$(DATABASE_URL)" psql -f migrations/seeds/seed_dev.sql

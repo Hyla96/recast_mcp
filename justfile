@@ -72,14 +72,14 @@ db-new-migration name:
 
 # Seed the database with development data (idempotent)
 db-seed:
-    psql $DATABASE_URL -f migrations/seed_dev.sql
+    psql $DATABASE_URL -f migrations/seeds/seed_dev.sql
 
 # Reset: drop and recreate the database, re-run migrations, re-seed
 db-reset:
     sqlx database drop --force
     sqlx database create
     cargo sqlx migrate run
-    psql $DATABASE_URL -f migrations/seed_dev.sql
+    psql $DATABASE_URL -f migrations/seeds/seed_dev.sql
 
 # Prepare sqlx offline query cache (.sqlx/ directory) — requires DATABASE_URL
 db-prepare:

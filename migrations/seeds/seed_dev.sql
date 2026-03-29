@@ -4,7 +4,7 @@
 -- server token sufficient for local development and integration tests.
 --
 -- Usage:
---   psql $DATABASE_URL -f migrations/seed_dev.sql
+--   psql $DATABASE_URL -f migrations/seeds/seed_dev.sql
 --   or
 --   just db-seed
 

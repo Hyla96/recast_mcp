@@ -84,7 +84,7 @@ Port map (host):
 
 - Migrations live in `migrations/` using timestamp-prefixed filenames (`YYYYMMDDHHMMSS_name.sql`).
 - Run `just db-migrate` after cloning or adding new migrations.
-- Dev seed data: `migrations/seed_dev.sql` — run with `just db-seed`. Idempotent.
+- Dev seed data: `migrations/seeds/seed_dev.sql` — run with `just db-seed`. Idempotent. The seeds directory is a subdirectory so `sqlx::migrate!()` skips it.
 - sqlx offline query cache: `.sqlx/` directory (tracked in git). Regenerate with `just db-prepare` when `sqlx::query!()` macros are added/changed.
 - Set `SQLX_OFFLINE=true` in CI to compile without a live database.
 - Five core tables: `users`, `mcp_servers`, `credentials`, `server_tokens`, `audit_log`.
@@ -159,6 +159,21 @@ DB connectivity uses `sqlx::PgPool::connect_lazy` (non-blocking at startup). The
 `DbCheckerFn = Arc<dyn Fn() -> DbCheckFuture + Send + Sync>` — an injectable type alias. Use `mcp_common::health::pg_pool_checker(pool)` in production; inject a mock closure in tests. This makes service-level tests fully DB-independent.
 
 docker-compose health checks use `/health/ready` (not `/health/live`) so `condition: service_healthy` verifies actual DB connectivity.
+
+## Integration Tests
+
+Integration tests live in `services/{service}/tests/integration_tests.rs`. They require a live PostgreSQL instance.
+
+```
+TEST_DATABASE_URL=postgres://recast:recast@localhost:5432/postgres \
+  cargo test --workspace --test integration_tests
+```
+
+- Set `TEST_DATABASE_URL` (or `DATABASE_URL`) — must point to any database on the server; the DB name is replaced per-test.
+- `mcp_common::testing` module (feature `testing`) provides: `TestDatabase` (isolated DB per test, auto-dropped), `MockUpstream` (in-process HTTP stub with request recording), `TestMcpClient` (JSON-RPC client helper).
+- Services activate the testing utilities via: `mcp-common = { ..., features = ["testing"] }` in `[dev-dependencies]`. The feature is never active in release builds.
+- Integration tests are **not** compiled by `cargo build` or `cargo clippy` without `--tests`. They have `#![allow(clippy::expect_used, ...)]` at the top since panicking on test-setup failure is intentional.
+- Seed file is at `migrations/seeds/seed_dev.sql` (subdirectory keeps it out of `sqlx::migrate!()` scans).
 
 ## Build Sequence (When Code Exists)
 
