@@ -57,10 +57,12 @@ pub struct ServerConfig {
     pub config_json: serde_json::Value,
     /// Server status: one of `active`, `draft`, or `inactive`.
     pub status: String,
+    /// Monotonically increasing version counter. Incremented on every UPDATE.
+    /// Used by the hot-reload listener to discard out-of-order notifications.
+    pub config_version: i64,
     /// Row creation timestamp.
     pub created_at: DateTime<Utc>,
-    /// Last-updated timestamp; used as a monotonic config version proxy until
-    /// the dedicated `config_version` column is added (TASK-003).
+    /// Last-updated timestamp.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -190,7 +192,7 @@ impl ConfigCache {
 
         let maybe_row = sqlx::query(
             "SELECT id, user_id, name, slug, description, config_json, \
-             status, created_at, updated_at \
+             status, config_version, created_at, updated_at \
              FROM mcp_servers \
              WHERE id = $1 AND status = 'active'",
         )
@@ -274,7 +276,7 @@ impl ConfigCache {
     pub async fn load_all(&self) -> Result<usize, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, user_id, name, slug, description, config_json, \
-             status, created_at, updated_at \
+             status, config_version, created_at, updated_at \
              FROM mcp_servers \
              WHERE status = 'active'",
         )
@@ -296,7 +298,10 @@ impl ConfigCache {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Decode a [`ServerConfig`] from a Postgres row returned by the cache queries.
-fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<ServerConfig, sqlx::Error> {
+///
+/// The SELECT must include: id, user_id, name, slug, description, config_json,
+/// status, config_version, created_at, updated_at.
+pub(crate) fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<ServerConfig, sqlx::Error> {
     use sqlx::Row;
     Ok(ServerConfig {
         id: row.try_get("id")?,
@@ -306,6 +311,7 @@ fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<ServerConfig, sql
         description: row.try_get("description")?,
         config_json: row.try_get("config_json")?,
         status: row.try_get("status")?,
+        config_version: row.try_get("config_version")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -334,6 +340,7 @@ mod tests {
             description: None,
             config_json: serde_json::json!({}),
             status: "active".to_string(),
+            config_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
@@ -393,6 +400,7 @@ mod tests {
                 description: None,
                 config_json: serde_json::json!({"version": 2}),
                 status: "active".to_string(),
+                config_version: 2,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             });

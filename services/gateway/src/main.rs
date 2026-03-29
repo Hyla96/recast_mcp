@@ -2,15 +2,18 @@
 
 mod config;
 pub mod cache;
+pub mod hot_reload;
 pub mod protocol;
 
 use axum::{routing::get, Extension, Router};
+use cache::ConfigCache;
 use config::Config;
+use hot_reload::ConfigSyncTask;
 use mcp_common::{
     health::{live_handler, pg_pool_checker, ready_handler, HealthState},
     init_telemetry, metrics_handler, track_metrics, FromEnv,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tower_http::trace::TraceLayer;
 
 #[tokio::main]
@@ -59,6 +62,23 @@ async fn main() {
         injector_socket_path = cfg.injector_socket_path,
         "starting gateway"
     );
+
+    // Pre-warm the in-memory config cache from PostgreSQL.
+    let cache = Arc::new(ConfigCache::new(db_pool.clone()));
+    match cache.load_all().await {
+        Ok(n) => tracing::info!(entries = n, "config cache loaded"),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to load config cache at startup");
+            std::process::exit(1);
+        }
+    }
+
+    // Start the hot-reload listener. Uses a dedicated PgListener connection
+    // separate from the shared request pool.
+    let sync_task =
+        ConfigSyncTask::new(cfg.database_url.clone(), db_pool.clone(), Arc::clone(&cache));
+    // Detach the handle — the task runs for the lifetime of the process.
+    let _sync_handle = sync_task.start();
 
     let health_state = HealthState {
         service: "mcp-gateway",
