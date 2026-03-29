@@ -6,6 +6,7 @@ pub mod cache;
 pub mod circuit_breaker;
 pub mod hot_reload;
 pub mod protocol;
+pub mod router;
 pub mod upstream;
 pub mod sidecar;
 pub mod transform;

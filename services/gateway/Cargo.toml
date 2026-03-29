@@ -58,5 +58,9 @@ harness = false
 name = "transform_pipeline"
 harness = false
 
+[[bench]]
+name = "router_dispatch"
+harness = false
+
 [lints]
 workspace = true
