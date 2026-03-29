@@ -55,11 +55,17 @@ pub struct ServerConfig {
     pub description: Option<String>,
     /// Tool definitions and upstream API config (raw JSONB from the DB).
     pub config_json: serde_json::Value,
-    /// Server status: one of `active`, `draft`, or `inactive`.
+    /// Server status: one of `active`, `draft`, `inactive`, or `suspended`.
     pub status: String,
     /// Monotonically increasing version counter. Incremented on every UPDATE.
     /// Used by the hot-reload listener to discard out-of-order notifications.
     pub config_version: i64,
+    /// Argon2id PHC hash of the server's Bearer token.
+    /// `None` if no token has been configured for this server.
+    pub token_hash: Option<String>,
+    /// First 8 characters of the raw token, safe to include in logs.
+    /// `None` if no token has been configured for this server.
+    pub token_prefix: Option<String>,
     /// Row creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last-updated timestamp.
@@ -192,7 +198,8 @@ impl ConfigCache {
 
         let maybe_row = sqlx::query(
             "SELECT id, user_id, name, slug, description, config_json, \
-             status, config_version, created_at, updated_at \
+             status, config_version, token_hash, token_prefix, \
+             created_at, updated_at \
              FROM mcp_servers \
              WHERE id = $1 AND status = 'active'",
         )
@@ -276,7 +283,8 @@ impl ConfigCache {
     pub async fn load_all(&self) -> Result<usize, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, user_id, name, slug, description, config_json, \
-             status, config_version, created_at, updated_at \
+             status, config_version, token_hash, token_prefix, \
+             created_at, updated_at \
              FROM mcp_servers \
              WHERE status = 'active'",
         )
@@ -300,7 +308,7 @@ impl ConfigCache {
 /// Decode a [`ServerConfig`] from a Postgres row returned by the cache queries.
 ///
 /// The SELECT must include: id, user_id, name, slug, description, config_json,
-/// status, config_version, created_at, updated_at.
+/// status, config_version, token_hash, token_prefix, created_at, updated_at.
 pub(crate) fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<ServerConfig, sqlx::Error> {
     use sqlx::Row;
     Ok(ServerConfig {
@@ -312,6 +320,8 @@ pub(crate) fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<Server
         config_json: row.try_get("config_json")?,
         status: row.try_get("status")?,
         config_version: row.try_get("config_version")?,
+        token_hash: row.try_get("token_hash")?,
+        token_prefix: row.try_get("token_prefix")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -341,6 +351,8 @@ mod tests {
             config_json: serde_json::json!({}),
             status: "active".to_string(),
             config_version: 1,
+            token_hash: None,
+            token_prefix: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
@@ -401,6 +413,8 @@ mod tests {
                 config_json: serde_json::json!({"version": 2}),
                 status: "active".to_string(),
                 config_version: 2,
+                token_hash: None,
+                token_prefix: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             });

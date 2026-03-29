@@ -577,6 +577,8 @@ mod tests {
             config_json,
             status: "active".to_string(),
             config_version: 1,
+            token_hash: None,
+            token_prefix: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -25,6 +25,9 @@ moka = { version = "0.12", features = ["sync"] }
 dashmap = "6"
 percent-encoding = "2"
 thiserror = "1.0"
+argon2 = { version = "0.5", features = ["std", "password-hash"] }
+base64ct = { version = "1", features = ["alloc"] }
+rand = "0.8"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
@@ -43,6 +46,10 @@ harness = false
 
 [[bench]]
 name = "cache_get"
+harness = false
+
+[[bench]]
+name = "argon2_verify"
 harness = false
 
 [lints]

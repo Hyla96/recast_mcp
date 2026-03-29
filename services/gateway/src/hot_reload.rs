@@ -413,7 +413,8 @@ async fn replay_missed_changes(
 
     let rows = sqlx::query(
         "SELECT id, user_id, name, slug, description, config_json, \
-         status, config_version, created_at, updated_at \
+         status, config_version, token_hash, token_prefix, \
+         created_at, updated_at \
          FROM mcp_servers \
          WHERE status = 'active' AND updated_at >= $1",
     )
@@ -452,7 +453,8 @@ async fn fetch_config(
 ) -> Result<Option<ServerConfig>, sqlx::Error> {
     let maybe_row = sqlx::query(
         "SELECT id, user_id, name, slug, description, config_json, \
-         status, config_version, created_at, updated_at \
+         status, config_version, token_hash, token_prefix, \
+         created_at, updated_at \
          FROM mcp_servers \
          WHERE id = $1 AND status = 'active'",
     )
@@ -632,6 +634,8 @@ mod tests {
             config_json: serde_json::json!({}),
             status: "active".into(),
             config_version: 2,
+            token_hash: None,
+            token_prefix: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }));

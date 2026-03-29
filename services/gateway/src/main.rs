@@ -1,6 +1,7 @@
 //! MCP Gateway service.
 
 mod config;
+pub mod auth;
 pub mod cache;
 pub mod hot_reload;
 pub mod protocol;
