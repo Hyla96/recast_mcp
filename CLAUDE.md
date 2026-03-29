@@ -90,6 +90,8 @@ Port map (host):
 - Five core tables: `users`, `mcp_servers`, `credentials`, `server_tokens`, `audit_log`.
 - Hot-path indexes: `idx_mcp_servers_slug_active` (partial, status = 'active'), `idx_server_tokens_hash_active` (partial, is_active = true).
 - `updated_at` columns on `users` and `mcp_servers` are maintained automatically by PostgreSQL triggers.
+- `sqlx::Error::Database` exposes `.constraint()` which returns the violated constraint name. Use `db_err.constraint().is_some_and(|c| c.contains("constraint_name"))` to distinguish specific conflicts (e.g., slug collisions) from other DB errors.
+- `use sqlx::Row` must be in scope for `.try_get()` to compile. In test functions, place the import at the top of the function body — module-level imports don't always suffice when the test module is in a separate file.
 
 ## CI/CD Pipelines (Woodpecker CI)
 
@@ -126,7 +128,7 @@ All three Rust services initialize telemetry via `mcp_common::init_telemetry(ser
 - **Traces:** OTLP gRPC to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`). Set `OTEL_SDK_DISABLED=true` to disable.
 - **Logs:** Structured JSON on stdout with fields: `timestamp`, `level`, `service`, `version`, `message`, `trace_id` (inside spans), `span_id` (inside spans).
 - **Metrics:** Prometheus format at `/metrics` on each service. Uses `metrics` + `metrics-exporter-prometheus` crates. Record DB query durations as `db_query_duration_seconds` histogram. The shared `mcp_common::track_metrics` middleware records `http_requests_total` and `http_request_duration_seconds` using `axum::extract::MatchedPath` for the `path` label (route template like `/v1/servers/:id`, not the raw URI) to prevent unbounded Prometheus cardinality.
-- **Local observability stack:** `docker compose up` starts OTEL Collector (ports 4317/4318) and Jaeger UI at `http://localhost:16686`.
+- **Local observability stack:** `docker compose up` starts OTEL Collector (ports 4317/4318) and Jaeger UI at `http://localhost:16686`. Topology: services → `otel-collector:4317` (OTLP gRPC) → collector exports to `jaeger:14250` (OTLP gRPC). The collector (contrib image) mediates all telemetry — services never connect directly to Jaeger.
 - **HTTP tracing:** `tower_http::trace::TraceLayer` creates a tracing span per HTTP request. Combined with the OTEL subscriber layer, these become OTEL spans automatically.
 - Crate versions: `opentelemetry 0.26`, `opentelemetry_sdk 0.26` (rt-tokio feature), `opentelemetry-otlp 0.26` (grpc-tonic feature), `tracing-opentelemetry 0.27`.
 - `opentelemetry_otlp::new_pipeline().tracing()...install_batch(Tokio)` returns `TracerProvider` in 0.26 (not `Tracer`). Call `.tracer(name)` on the provider to get a `Tracer` for `tracing_opentelemetry::layer().with_tracer()`.
@@ -144,6 +146,7 @@ All 4xx/5xx responses from the Platform API use a single JSON shape. Full spec i
 - `mcp_common::request_id_middleware` (axum `from_fn` middleware) adds `X-Request-ID` to responses that don't already carry the header (i.e., successful responses). Wire it with `.layer(axum::middleware::from_fn(request_id_middleware))`.
 - `mcp_common::RequestId` extension is stored on the request by the middleware; handlers can extract it via `Extension<RequestId>` if needed.
 - Error messages never include stack traces, SQL error strings, or internal file paths.
+- `#[serde(deny_unknown_fields)]` on structs used as axum `Json<T>` extractors automatically returns 422 Unprocessable Entity for unknown fields in the request body — no custom validation needed. Use this on input DTOs (e.g., `ServerConfigInput`) but not on DB-read DTOs where forward compatibility matters.
 
 ## Health Checks
 
@@ -193,6 +196,7 @@ TEST_DATABASE_URL=postgres://recast:recast@localhost:5432/postgres \
 - Integration tests are **not** compiled by `cargo build` or `cargo clippy` without `--tests`. They have `#![allow(clippy::expect_used, ...)]` at the top since panicking on test-setup failure is intentional.
 - Seed file is at `migrations/seeds/seed_dev.sql` (subdirectory keeps it out of `sqlx::migrate!()` scans).
 - **Shared test helpers** live in `services/api/tests/helpers/mod.rs`. This module provides `TestRsaKey`, `make_jwt`, `make_jwt_with_offset`, `make_state_with_jwks`, and `TEST_ISSUER` — imported by auth, server, and credential endpoint tests via `mod helpers;`. New integration test files should use these shared fixtures instead of defining their own.
+- `#[tokio::test]` requires `tokio = { version = "1", features = ["rt", "macros"] }` in dev-dependencies. The `"rt"` feature alone is insufficient — the `macros` feature provides the `#[tokio::test]` proc macro.
 
 ## Module Structure
 
