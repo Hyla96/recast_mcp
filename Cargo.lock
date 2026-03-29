@@ -959,6 +959,7 @@ dependencies = [
 name = "mcp-common"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

@@ -1,7 +1,9 @@
 //! Shared types and utilities for all services.
 
+pub mod config;
 pub mod error;
 
+pub use config::{load_encryption_key, ConfigError};
 pub use error::AppError;
 
 /// Trait for types that can be loaded from environment variables.
