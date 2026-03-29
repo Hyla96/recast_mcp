@@ -23,6 +23,8 @@ tower-http = { workspace = true }
 deadpool-redis = "0.15"
 moka = { version = "0.12", features = ["sync"] }
 dashmap = "6"
+percent-encoding = "2"
+thiserror = "1.0"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

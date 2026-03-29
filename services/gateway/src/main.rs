@@ -4,6 +4,8 @@ mod config;
 pub mod cache;
 pub mod hot_reload;
 pub mod protocol;
+pub mod upstream;
+pub mod util;
 
 use axum::{routing::get, Extension, Router};
 use cache::ConfigCache;
