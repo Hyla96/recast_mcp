@@ -4,7 +4,10 @@ pub mod config;
 pub mod error;
 pub mod telemetry;
 
-pub use config::{load_encryption_key, ConfigError};
+pub use config::{
+    env_optional, env_optional_parsed, env_required, load_encryption_key, ConfigError,
+    ConfigErrors,
+};
 pub use error::AppError;
 pub use telemetry::{init_telemetry, TelemetryError, TelemetryGuard};
 

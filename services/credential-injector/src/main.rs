@@ -1,12 +1,15 @@
 //! Credential Injector sidecar service.
 
+mod config;
+
 use axum::{
     http::header,
     response::IntoResponse,
     routing::get,
     Extension, Router,
 };
-use mcp_common::init_telemetry;
+use config::Config;
+use mcp_common::{init_telemetry, FromEnv};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::{net::SocketAddr, time::Instant};
 use tower_http::trace::TraceLayer;
@@ -56,6 +59,16 @@ async fn metrics_handler(
 
 #[tokio::main]
 async fn main() {
+    // Validate configuration before initializing any subsystems.
+    // Fail immediately with all missing/malformed variables listed.
+    let cfg = match Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("credential-injector: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let _telemetry = match init_telemetry("mcp-credential-injector", env!("CARGO_PKG_VERSION")) {
         Ok(g) => g,
         Err(e) => {
@@ -74,7 +87,11 @@ async fn main() {
         }
     };
 
-    tracing::info!("starting credential injector");
+    tracing::info!(
+        port = cfg.port,
+        database_url = cfg.database_url,
+        "starting credential injector"
+    );
 
     let app = Router::new()
         .route("/health/live", get(|| async { "ok" }))
@@ -83,7 +100,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(track_metrics));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3002));
+    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     tracing::info!("listening on {}", addr);
 
     match tokio::net::TcpListener::bind(&addr).await {
