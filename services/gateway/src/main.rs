@@ -1,6 +1,7 @@
 //! MCP Gateway service.
 
 mod config;
+pub mod cache;
 pub mod protocol;
 
 use axum::{routing::get, Extension, Router};

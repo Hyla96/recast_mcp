@@ -21,6 +21,8 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 tower-http = { workspace = true }
 deadpool-redis = "0.15"
+moka = { version = "0.12", features = ["sync"] }
+dashmap = "6"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
@@ -35,6 +37,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "jsonrpc_parse"
+harness = false
+
+[[bench]]
+name = "cache_get"
 harness = false
 
 [lints]
