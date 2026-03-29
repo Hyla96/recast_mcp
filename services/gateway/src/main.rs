@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod upstream;
 pub mod sidecar;
 pub mod transform;
+pub mod tool_schema;
 pub mod util;
 
 use axum::{routing::get, Extension, Router};

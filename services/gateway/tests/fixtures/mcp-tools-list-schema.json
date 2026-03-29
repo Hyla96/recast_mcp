@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MCP tools/list response — tools array",
+  "description": "Validates the 'tools' array returned in an MCP tools/list response per the 2025-03-26 specification.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["name", "inputSchema"],
+    "properties": {
+      "name": {
+        "type": "string",
+        "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$",
+        "description": "Tool identifier — must match the MCP tool name regex"
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 1024,
+        "description": "Human-readable tool description, at most 1024 characters"
+      },
+      "inputSchema": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["object"],
+            "description": "Must always be 'object' per MCP spec"
+          },
+          "properties": {
+            "type": "object",
+            "description": "Maps parameter names to their JSON Schema property definitions"
+          },
+          "required": {
+            "type": "array",
+            "items": { "type": "string" },
+            "uniqueItems": true,
+            "description": "Names of parameters that are required"
+          }
+        }
+      }
+    }
+  }
+}
