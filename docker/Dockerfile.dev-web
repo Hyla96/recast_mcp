@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+#
+# Development image for the Recast MCP React frontend (apps/web).
+# Installs pnpm and runs the Vite dev server with HMR.
+#
+# Used by docker/docker-compose.override.yml — NOT for production builds.
+
+FROM node:20-slim
+
+RUN npm install -g pnpm@9.0.0
+
+WORKDIR /app

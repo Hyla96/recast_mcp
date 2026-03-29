@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://recast-mcp.example.com/schemas/api/error-response",
+  "title": "ErrorResponse",
+  "description": "Standard error response body returned by the Platform API for all 4xx and 5xx responses.",
+  "type": "object",
+  "required": ["error"],
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "description": "Error details.",
+      "type": "object",
+      "required": ["code", "message", "request_id"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "description": "Stable snake_case error code identifying the error class. Never changes across versions.",
+          "type": "string",
+          "enum": [
+            "not_found",
+            "unauthorized",
+            "forbidden",
+            "bad_request",
+            "internal_server_error",
+            "conflict"
+          ],
+          "examples": ["not_found", "unauthorized"]
+        },
+        "message": {
+          "description": "Human-readable description of the error. Suitable for display in developer tooling. Never exposes implementation details (stack traces, SQL errors, file paths).",
+          "type": "string",
+          "examples": ["not found: mcp_server with id abc123", "unauthorized: bearer token is expired"]
+        },
+        "request_id": {
+          "description": "Per-request ULID. Matches the X-Request-ID response header. Use this value when filing a bug report or contacting support.",
+          "type": "string",
+          "pattern": "^[0-9A-Z]{26}$",
+          "examples": ["01HWRF3J5X0000000000000000"]
+        }
+      }
+    }
+  }
+}

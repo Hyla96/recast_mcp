@@ -1,0 +1,52 @@
+---
+# Triggered when shared Rust libraries or workspace-level Cargo files change.
+# Runs fmt-check, clippy, and tests for the entire workspace.
+# Also verifies that no libs/* crate declares a dependency on any services/* crate.
+#
+# A change that touches only services/gateway/** does NOT trigger this pipeline.
+# Use .woodpecker/gateway.yml for gateway-only changes.
+
+when:
+  - event: [pull_request, push]
+    paths:
+      include:
+        - "libs/**"
+        - "Cargo.toml"
+        - "Cargo.lock"
+        - "rust-toolchain.toml"
+
+steps:
+  - name: fmt-check
+    image: rust:1.85
+    environment:
+      CARGO_HOME: ${CI_WORKSPACE}/.cargo-home
+      SQLX_OFFLINE: "true"
+    commands:
+      - cargo fmt --all -- --check
+
+  - name: clippy
+    image: rust:1.85
+    environment:
+      CARGO_HOME: ${CI_WORKSPACE}/.cargo-home
+      SQLX_OFFLINE: "true"
+    commands:
+      - cargo clippy --workspace --all-targets -- -D warnings
+    depends_on:
+      - fmt-check
+
+  - name: test
+    image: rust:1.85
+    environment:
+      CARGO_HOME: ${CI_WORKSPACE}/.cargo-home
+      SQLX_OFFLINE: "true"
+    commands:
+      - cargo test --workspace
+    depends_on:
+      - fmt-check
+
+  - name: lib-dep-check
+    image: alpine:3.19
+    commands:
+      - sh .woodpecker/scripts/check-lib-deps.sh
+    depends_on:
+      - fmt-check

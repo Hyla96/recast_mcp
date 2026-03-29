@@ -1,0 +1,152 @@
+# Recast MCP — base service topology (production-like).
+#
+# This file describes the complete service topology using release images.
+# For local development with hot reload, merge with docker/docker-compose.override.yml:
+#   docker compose -f docker-compose.yml -f docker/docker-compose.override.yml up
+# Or simply: make dev
+#
+# Required environment variables — copy .env.example to .env and fill in:
+#   cp .env.example .env
+
+services:
+  # ─── OpenTelemetry Collector ─────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    depends_on:
+      - jaeger
+
+  # ─── Jaeger (trace UI + storage) ─────────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.66
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14250:14250"  # Jaeger gRPC (collector → Jaeger)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:16686/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recast}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recast}
+      POSTGRES_DB: ${POSTGRES_DB:-recast_mcp}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recast} -d ${POSTGRES_DB:-recast_mcp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  # ─── Gateway (MCP proxy, port 3000) ─────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-recast}:${POSTGRES_PASSWORD:-recast}@db:5432/${POSTGRES_DB:-recast_mcp}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      RUST_LOG: ${RUST_LOG:-info}
+      SQLX_OFFLINE: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health/ready || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 15s
+
+  # ─── Platform API (control plane, port 3001) ─────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-recast}:${POSTGRES_PASSWORD:-recast}@db:5432/${POSTGRES_DB:-recast_mcp}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info}
+      SQLX_OFFLINE: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/health/ready || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 15s
+
+  # ─── Credential Injector (sidecar, port 3002) ────────────────────────────────
+  credential-injector:
+    build:
+      context: .
+      dockerfile: docker/credential-injector/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-recast}:${POSTGRES_PASSWORD:-recast}@db:5432/${POSTGRES_DB:-recast_mcp}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      RUST_LOG: ${RUST_LOG:-info}
+      SQLX_OFFLINE: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3002/health/ready || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 15s
+
+volumes:
+  pgdata:

@@ -1,0 +1,35 @@
+# OpenTelemetry Collector configuration for local development.
+#
+# Receives OTLP gRPC/HTTP from all three Rust services, exports traces to Jaeger.
+# Prometheus metrics are scraped directly from each service's /metrics endpoint
+# — this collector handles traces only.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    # Send spans in batches of up to 512 or every 5 seconds, whichever comes first.
+    send_batch_size: 512
+    timeout: 5s
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]

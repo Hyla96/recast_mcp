@@ -1,0 +1,83 @@
+---
+# Triggered when services/gateway/** changes.
+# Runs gateway-scoped fmt-check, clippy, and tests.
+# On merge to main: builds and pushes a multi-arch Docker image.
+#
+# Required Woodpecker secrets (set in the Woodpecker server UI):
+#   docker_registry  — registry host, e.g. "ghcr.io"
+#   docker_org       — registry organisation, e.g. "myorg"
+#   docker_username  — registry login username
+#   docker_password  — registry login password or token
+
+when:
+  - event: [pull_request, push]
+    paths:
+      include:
+        - "services/gateway/**"
+
+steps:
+  - name: fmt-check
+    image: rust:1.85
+    environment:
+      CARGO_HOME: ${CI_WORKSPACE}/.cargo-home
+      SQLX_OFFLINE: "true"
+    commands:
+      - cargo fmt --all -- --check
+
+  - name: clippy
+    image: rust:1.85
+    environment:
+      CARGO_HOME: ${CI_WORKSPACE}/.cargo-home
+      SQLX_OFFLINE: "true"
+    commands:
+      - cargo clippy -p mcp-gateway --all-targets -- -D warnings
+    depends_on:
+      - fmt-check
+
+  - name: test
+    image: rust:1.85
+    environment:
+      CARGO_HOME: ${CI_WORKSPACE}/.cargo-home
+      SQLX_OFFLINE: "true"
+    commands:
+      - cargo test -p mcp-gateway
+    depends_on:
+      - fmt-check
+
+  # Write the two image tags to .tags — read by the docker-publish step.
+  # Runs only on push to main.
+  - name: prepare-docker-tags
+    image: alpine/git
+    commands:
+      - git rev-parse --short=8 HEAD > .tags
+      - echo "latest" >> .tags
+    when:
+      - event: push
+        branch: main
+    depends_on:
+      - test
+      - clippy
+
+  - name: docker-publish
+    image: woodpeckerci/plugin-docker-buildx
+    environment:
+      DOCKER_REGISTRY:
+        from_secret: docker_registry
+      DOCKER_ORG:
+        from_secret: docker_org
+    settings:
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      registry:
+        from_secret: docker_registry
+      repo: ${DOCKER_REGISTRY}/${DOCKER_ORG}/mcp-gateway
+      tags_file: .tags
+      dockerfile: docker/gateway/Dockerfile
+      platforms: linux/amd64,linux/arm64
+    when:
+      - event: push
+        branch: main
+    depends_on:
+      - prepare-docker-tags
