@@ -1,0 +1,47 @@
+---
+# Triggered when apps/web/** changes.
+# Runs TypeScript type-check, ESLint, and production build.
+
+when:
+  - event: [pull_request, push]
+    paths:
+      include:
+        - "apps/web/**"
+        - "pnpm-workspace.yaml"
+        - "pnpm-lock.yaml"
+        - "package.json"
+
+steps:
+  # Install pnpm and all workspace dependencies.
+  # node_modules is written to the shared workspace directory and reused
+  # by all subsequent steps without reinstallation.
+  - name: install
+    image: node:20
+    commands:
+      - npm install -g pnpm@9 --quiet
+      - pnpm install --frozen-lockfile
+
+  - name: type-check
+    image: node:20
+    commands:
+      - npm install -g pnpm@9 --quiet
+      - pnpm --filter @mcp/web type-check
+    depends_on:
+      - install
+
+  - name: lint
+    image: node:20
+    commands:
+      - npm install -g pnpm@9 --quiet
+      - pnpm --filter @mcp/web lint
+    depends_on:
+      - install
+
+  - name: build
+    image: node:20
+    commands:
+      - npm install -g pnpm@9 --quiet
+      - pnpm --filter @mcp/web build
+    depends_on:
+      - type-check
+      - lint

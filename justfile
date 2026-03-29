@@ -46,15 +46,15 @@ fe-install:
 
 # Start frontend dev server
 fe-dev:
-    pnpm --filter @recast-mcp/web dev
+    pnpm --filter @mcp/web dev
 
 # Build frontend for production
 fe-build:
-    pnpm --filter @recast-mcp/web build
+    pnpm --filter @mcp/web build
 
 # Lint frontend code
 fe-lint:
-    pnpm --filter @recast-mcp/web lint
+    pnpm --filter @mcp/web lint
 
 # ─── Database ──────────────────────────────────────────────────────
 

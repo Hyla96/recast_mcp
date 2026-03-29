@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recast MCP is a hosted, no-code platform that exposes any REST API to AI agents (Claude, Cursor, ChatGPT) as a live MCP server. The full product spec lives in `docs/SUMMARY.md`.
 
-**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented.
+**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented, Woodpecker CI pipelines and Docker multi-stage builds in place.
 
 ## Planned Architecture
 
@@ -67,6 +67,34 @@ Run `just` to see all available recipes. Key ones:
 - Five core tables: `users`, `mcp_servers`, `credentials`, `server_tokens`, `audit_log`.
 - Hot-path indexes: `idx_mcp_servers_slug_active` (partial, status = 'active'), `idx_server_tokens_hash_active` (partial, is_active = true).
 - `updated_at` columns on `users` and `mcp_servers` are maintained automatically by PostgreSQL triggers.
+
+## CI/CD Pipelines (Woodpecker CI)
+
+Pipeline files live in `.woodpecker/`. Each file has a pipeline-level `when.paths` filter so only the relevant pipeline triggers on a given PR.
+
+| Pipeline file | Triggers on |
+|---|---|
+| `rust-shared.yml` | `libs/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` |
+| `gateway.yml` | `services/gateway/**` |
+| `api.yml` | `services/api/**` |
+| `credential-injector.yml` | `services/credential-injector/**` |
+| `frontend.yml` | `apps/web/**`, `pnpm-workspace.yaml`, `pnpm-lock.yaml` |
+
+All Rust CI steps set `SQLX_OFFLINE=true` so no live database is needed.
+
+**Docker images** (built on push to `main` only):
+- Dockerfiles live in `docker/{service}/Dockerfile`.
+- All use a cargo-chef multi-stage pattern: `chef → planner → builder → runtime (debian:bookworm-slim)`.
+- Tagged `{registry}/{org}/mcp-{service}:{short-sha}` and `{registry}/{org}/mcp-{service}:latest`.
+- Secrets required in Woodpecker server: `docker_registry`, `docker_org`, `docker_username`, `docker_password`.
+- Platforms: `linux/amd64,linux/arm64`.
+
+**Lib-dep guard** (in `rust-shared.yml`): `.woodpecker/scripts/check-lib-deps.sh` verifies no `libs/*` crate depends on any `services/*` crate.
+
+**Local execution** (no Woodpecker server needed):
+```
+woodpecker-cli exec .woodpecker/rust-shared.yml
+```
 
 ## Build Sequence (When Code Exists)
 
