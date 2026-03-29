@@ -40,6 +40,15 @@ make dev
 DATABASE_URL=postgres://recast:recast@localhost:5432/recast_mcp just run-gateway
 ```
 
+## Health endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health/live` | GET | Returns HTTP 200 immediately after the process starts. Body: `{"status":"ok","service":"mcp-gateway","version":"..."}` |
+| `/health/ready` | GET | Returns HTTP 200 when PostgreSQL is reachable; HTTP 503 otherwise. Body includes a `checks.database` object with status and optional error message. Checks time out after 500 ms. |
+
+Health endpoints are excluded from authentication middleware, rate limiting, and OpenTelemetry trace spans.
+
 ## Fail-fast startup
 
 Starting the gateway with a missing required variable exits immediately:

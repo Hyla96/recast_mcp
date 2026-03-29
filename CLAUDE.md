@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recast MCP is a hosted, no-code platform that exposes any REST API to AI agents (Claude, Cursor, ChatGPT) as a live MCP server. The full product spec lives in `docs/SUMMARY.md`.
 
-**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented, Woodpecker CI pipelines and Docker multi-stage builds in place, OpenTelemetry telemetry foundation wired into all services.
+**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented, Woodpecker CI pipelines and Docker multi-stage builds in place, OpenTelemetry telemetry foundation wired into all services, health check endpoints live on all services.
 
 ## Planned Architecture
 
@@ -144,6 +144,21 @@ All 4xx/5xx responses from the Platform API use a single JSON shape. Full spec i
 - `mcp_common::request_id_middleware` (axum `from_fn` middleware) adds `X-Request-ID` to responses that don't already carry the header (i.e., successful responses). Wire it with `.layer(axum::middleware::from_fn(request_id_middleware))`.
 - `mcp_common::RequestId` extension is stored on the request by the middleware; handlers can extract it via `Extension<RequestId>` if needed.
 - Error messages never include stack traces, SQL error strings, or internal file paths.
+
+## Health Checks
+
+All three services expose identical health endpoints via shared handlers in `mcp_common::health`:
+
+- `GET /health/live` — HTTP 200 immediately after process start. Body: `{"status":"ok","service":"...","version":"..."}`. No dependency checks.
+- `GET /health/ready` — HTTP 200 when PostgreSQL is reachable; HTTP 503 otherwise. Body: `{"status":"ok"|"degraded","checks":{"database":{"status":"ok"|"error","message":"..."}}}`. Individual checks time out after 500 ms.
+
+Health routes are mounted on a separate `Router` without `TraceLayer`, so they produce **no OTEL spans**. They are also outside the metrics middleware so they don't skew `http_requests_total`.
+
+DB connectivity uses `sqlx::PgPool::connect_lazy` (non-blocking at startup). The ready handler calls `pool.acquire()` to verify connectivity.
+
+`DbCheckerFn = Arc<dyn Fn() -> DbCheckFuture + Send + Sync>` — an injectable type alias. Use `mcp_common::health::pg_pool_checker(pool)` in production; inject a mock closure in tests. This makes service-level tests fully DB-independent.
+
+docker-compose health checks use `/health/ready` (not `/health/live`) so `condition: service_healthy` verifies actual DB connectivity.
 
 ## Build Sequence (When Code Exists)
 

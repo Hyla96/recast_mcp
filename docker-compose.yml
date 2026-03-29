@@ -81,7 +81,7 @@ services:
       otel-collector:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health/ready || exit 1"]
       interval: 5s
       timeout: 2s
       retries: 12
@@ -112,7 +112,7 @@ services:
       otel-collector:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3001/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/health/ready || exit 1"]
       interval: 5s
       timeout: 2s
       retries: 12
@@ -142,7 +142,7 @@ services:
       otel-collector:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3002/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:3002/health/ready || exit 1"]
       interval: 5s
       timeout: 2s
       retries: 12
