@@ -26,6 +26,7 @@ Frontend: React 19 + TypeScript + Vite + Zustand.
 - **Database:** PostgreSQL (JSONB configs, pgcrypto, LISTEN/NOTIFY)
 - **Auth:** Clerk (React + Rust SDKs)
 - **Monorepo:** Cargo workspaces (Rust) + pnpm workspaces (frontend)
+- **Task Runner:** [just](https://github.com/casey/just) — all project commands live in `justfile`
 - **CI/CD:** Woodpecker CI + Docker
 
 ## Key Design Decisions
@@ -37,6 +38,22 @@ Frontend: React 19 + TypeScript + Vite + Zustand.
 - SSRF protection: blocklist + post-DNS IP validation (RFC 1918, link-local, cloud metadata)
 - Response constraints: JSON only, 100KB max, 30s timeout
 - Rate limits: 100 calls/min per server, 1,000 calls/min per user (token bucket via Tower)
+
+## Common Commands
+
+Run `just` to see all available recipes. Key ones:
+
+| Command | Description |
+|---------|-------------|
+| `just check` | Run fmt-check + lint + test |
+| `just build` | Build all Rust crates |
+| `just test` | Run all Rust tests |
+| `just fe-dev` | Start frontend dev server |
+| `just fe-build` | Build frontend for production |
+| `just run-gateway` | Run the gateway service |
+| `just run-api` | Run the platform API |
+| `just db-migrate` | Run sqlx migrations |
+| `just clean` | Remove build artifacts |
 
 ## Build Sequence (When Code Exists)
 
