@@ -2,13 +2,15 @@
 
 pub mod config;
 pub mod error;
+pub mod middleware;
 pub mod telemetry;
 
 pub use config::{
     env_optional, env_optional_parsed, env_required, load_encryption_key, ConfigError,
     ConfigErrors,
 };
-pub use error::AppError;
+pub use error::{AppError, ErrorDetails, ErrorResponse};
+pub use middleware::{request_id_middleware, RequestId};
 pub use telemetry::{init_telemetry, TelemetryError, TelemetryGuard};
 
 /// Trait for types that can be loaded from environment variables.

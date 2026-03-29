@@ -256,6 +256,13 @@ mod tests {
 
     // ── FromEnv integration tests using a minimal test Config ─────────────
 
+    /// Global mutex that serializes tests which mutate or depend on the
+    /// `TEST_CFG_ALPHA_7F3B` / `TEST_CFG_BETA_7F3B` environment variables.
+    /// Without serialization, `test_from_env_succeeds_with_all_vars_set` may
+    /// run concurrently with `test_from_env_fails_with_multiple_missing_vars_and_lists_all`,
+    /// causing the latter to see the vars that the former sets.
+    static ENV_CFG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A minimal two-field config used to exercise `FromEnv` in tests.
     /// Uses env var names unlikely to conflict with any real service var.
     #[derive(Debug)]
@@ -286,6 +293,11 @@ mod tests {
 
     #[test]
     fn test_from_env_succeeds_with_all_vars_set() {
+        // Hold the mutex for the lifetime of this test to prevent concurrent
+        // tests from seeing stale env vars. Recover from poisoning so a
+        // previous test panic does not permanently block this test.
+        let _guard = ENV_CFG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         // Safety: these uniquely-prefixed names are not used by any other test.
         // SAFETY: test-only env mutation with collision-resistant names.
         unsafe {
@@ -323,6 +335,10 @@ mod tests {
 
     #[test]
     fn test_from_env_fails_with_multiple_missing_vars_and_lists_all() {
+        // Serialize with respect to test_from_env_succeeds_with_all_vars_set
+        // to ensure the vars are absent when this test runs.
+        let _guard = ENV_CFG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         // Both absent — FromEnv must report both in one error.
         let result = TestConfig::from_env();
         assert!(result.is_err(), "expected Err when both required vars are absent");

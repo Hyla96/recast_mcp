@@ -132,6 +132,19 @@ All three Rust services initialize telemetry via `mcp_common::init_telemetry(ser
 - `opentelemetry_otlp::new_pipeline().tracing()...install_batch(Tokio)` returns `TracerProvider` in 0.26 (not `Tracer`). Call `.tracer(name)` on the provider to get a `Tracer` for `tracing_opentelemetry::layer().with_tracer()`.
 - Use `sdktrace::Config::default()` not `sdktrace::config()` (deprecated alias).
 
+## API Error Contract
+
+All 4xx/5xx responses from the Platform API use a single JSON shape. Full spec in `docs/api/README.md`, JSON Schema in `docs/api/error-schema.json`.
+
+```json
+{"error": {"code": "not_found", "message": "...", "request_id": "01HWRF..."}}
+```
+
+- `AppError` (in `mcp-common`) implements `axum::response::IntoResponse`. When converted to a response it generates a fresh ULID, puts it in BOTH the JSON body (`error.request_id`) and the `X-Request-ID` response header so they always match.
+- `mcp_common::request_id_middleware` (axum `from_fn` middleware) adds `X-Request-ID` to responses that don't already carry the header (i.e., successful responses). Wire it with `.layer(axum::middleware::from_fn(request_id_middleware))`.
+- `mcp_common::RequestId` extension is stored on the request by the middleware; handlers can extract it via `Extension<RequestId>` if needed.
+- Error messages never include stack traces, SQL error strings, or internal file paths.
+
 ## Build Sequence (When Code Exists)
 
 The planned 8-week build starts with:
