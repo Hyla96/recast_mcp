@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recast MCP is a hosted, no-code platform that exposes any REST API to AI agents (Claude, Cursor, ChatGPT) as a live MCP server. The full product spec lives in `docs/SUMMARY.md`.
 
-**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented, Woodpecker CI pipelines and Docker multi-stage builds in place.
+**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented, Woodpecker CI pipelines and Docker multi-stage builds in place, OpenTelemetry telemetry foundation wired into all services.
 
 ## Planned Architecture
 
@@ -118,6 +118,19 @@ All Rust CI steps set `SQLX_OFFLINE=true` so no live database is needed.
 ```
 woodpecker-cli exec .woodpecker/rust-shared.yml
 ```
+
+## Telemetry
+
+All three Rust services initialize telemetry via `mcp_common::init_telemetry(service_name, version)` in `main()`. The guard returned must be held for the process lifetime.
+
+- **Traces:** OTLP gRPC to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`). Set `OTEL_SDK_DISABLED=true` to disable.
+- **Logs:** Structured JSON on stdout with fields: `timestamp`, `level`, `service`, `version`, `message`, `trace_id` (inside spans), `span_id` (inside spans).
+- **Metrics:** Prometheus format at `/metrics` on each service. Uses `metrics` + `metrics-exporter-prometheus` crates. Record DB query durations as `db_query_duration_seconds` histogram.
+- **Local observability stack:** `docker compose up` starts OTEL Collector (ports 4317/4318) and Jaeger UI at `http://localhost:16686`.
+- **HTTP tracing:** `tower_http::trace::TraceLayer` creates a tracing span per HTTP request. Combined with the OTEL subscriber layer, these become OTEL spans automatically.
+- Crate versions: `opentelemetry 0.26`, `opentelemetry_sdk 0.26` (rt-tokio feature), `opentelemetry-otlp 0.26` (grpc-tonic feature), `tracing-opentelemetry 0.27`.
+- `opentelemetry_otlp::new_pipeline().tracing()...install_batch(Tokio)` returns `TracerProvider` in 0.26 (not `Tracer`). Call `.tracer(name)` on the provider to get a `Tracer` for `tracing_opentelemetry::layer().with_tracer()`.
+- Use `sdktrace::Config::default()` not `sdktrace::config()` (deprecated alias).
 
 ## Build Sequence (When Code Exists)
 

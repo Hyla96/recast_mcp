@@ -2,9 +2,11 @@
 
 pub mod config;
 pub mod error;
+pub mod telemetry;
 
 pub use config::{load_encryption_key, ConfigError};
 pub use error::AppError;
+pub use telemetry::{init_telemetry, TelemetryError, TelemetryGuard};
 
 /// Trait for types that can be loaded from environment variables.
 pub trait FromEnv: Sized {
