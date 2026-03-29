@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recast MCP is a hosted, no-code platform that exposes any REST API to AI agents (Claude, Cursor, ChatGPT) as a live MCP server. The full product spec lives in `docs/SUMMARY.md`.
 
-**Status:** Pre-code — only the product spec exists. No build system, tests, or source code yet.
+**Status:** Active development — monorepo scaffolding complete, PostgreSQL schema migrations in place, shared Rust libraries implemented.
 
 ## Planned Architecture
 
@@ -53,7 +53,20 @@ Run `just` to see all available recipes. Key ones:
 | `just run-gateway` | Run the gateway service |
 | `just run-api` | Run the platform API |
 | `just db-migrate` | Run sqlx migrations |
+| `just db-seed` | Seed DB with dev data (idempotent) |
+| `just db-prepare` | Generate .sqlx/ offline cache (needs DATABASE_URL) |
 | `just clean` | Remove build artifacts |
+
+## Database
+
+- Migrations live in `migrations/` using timestamp-prefixed filenames (`YYYYMMDDHHMMSS_name.sql`).
+- Run `just db-migrate` after cloning or adding new migrations.
+- Dev seed data: `migrations/seed_dev.sql` — run with `just db-seed`. Idempotent.
+- sqlx offline query cache: `.sqlx/` directory (tracked in git). Regenerate with `just db-prepare` when `sqlx::query!()` macros are added/changed.
+- Set `SQLX_OFFLINE=true` in CI to compile without a live database.
+- Five core tables: `users`, `mcp_servers`, `credentials`, `server_tokens`, `audit_log`.
+- Hot-path indexes: `idx_mcp_servers_slug_active` (partial, status = 'active'), `idx_server_tokens_hash_active` (partial, is_active = true).
+- `updated_at` columns on `users` and `mcp_servers` are maintained automatically by PostgreSQL triggers.
 
 ## Build Sequence (When Code Exists)
 

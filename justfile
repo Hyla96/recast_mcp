@@ -58,13 +58,32 @@ fe-lint:
 
 # ─── Database ──────────────────────────────────────────────────────
 
-# Run sqlx migrations
+# Run sqlx migrations against DATABASE_URL
 db-migrate:
     cargo sqlx migrate run
 
-# Create a new migration
+# Check migration status
+db-status:
+    cargo sqlx migrate info
+
+# Create a new forward-only migration file
 db-new-migration name:
     cargo sqlx migrate add {{name}}
+
+# Seed the database with development data (idempotent)
+db-seed:
+    psql $DATABASE_URL -f migrations/seed_dev.sql
+
+# Reset: drop and recreate the database, re-run migrations, re-seed
+db-reset:
+    sqlx database drop --force
+    sqlx database create
+    cargo sqlx migrate run
+    psql $DATABASE_URL -f migrations/seed_dev.sql
+
+# Prepare sqlx offline query cache (.sqlx/ directory) — requires DATABASE_URL
+db-prepare:
+    cargo sqlx prepare --workspace
 
 # ─── Individual Services ───────────────────────────────────────────
 
