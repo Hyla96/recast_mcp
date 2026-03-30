@@ -8,22 +8,31 @@ pub mod hot_reload;
 pub mod logging;
 pub mod protocol;
 pub mod router;
-pub mod upstream;
 pub mod sidecar;
-pub mod transform;
 pub mod tool_schema;
+pub mod transform;
+pub mod transport;
+pub mod upstream;
 pub mod util;
 
+use auth::TokenValidator;
 use axum::{routing::get, Extension, Router};
 use cache::ConfigCache;
+use circuit_breaker::CircuitBreakerRegistry;
 use config::Config;
 use hot_reload::ConfigSyncTask;
+use logging::{LogLevel, RequestLogger};
 use mcp_common::{
     health::{live_handler, pg_pool_checker, ready_handler, HealthState},
     init_telemetry, metrics_handler, track_metrics, FromEnv,
 };
-use std::{net::SocketAddr, sync::Arc};
+use router::{Router as McpRouter, UpstreamPipeline};
+use sidecar::{SidecarPool, UpstreamExecutor};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::trace::TraceLayer;
+use transport::{build_transport_router, TransportState};
+use upstream::UpstreamRequestBuilder;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() {
@@ -89,6 +98,35 @@ async fn main() {
     // Detach the handle — the task runs for the lifetime of the process.
     let _sync_handle = sync_task.start();
 
+    // ── Build upstream pipeline ───────────────────────────────────────────────
+    //
+    // S-027: sidecar IPC pool + direct reqwest executor.
+    // S-026: request builder (reads GATEWAY_ALLOW_HTTP from env).
+    let sidecar_pool = SidecarPool::new(PathBuf::from(&cfg.injector_socket_path));
+    let circuit_registry = CircuitBreakerRegistry::new();
+    let http_client = reqwest::Client::new();
+    let executor = Arc::new(UpstreamExecutor::new(
+        sidecar_pool,
+        http_client,
+        circuit_registry,
+    ));
+    let request_builder = UpstreamRequestBuilder::new();
+    let upstream = UpstreamPipeline::new(executor, request_builder);
+
+    // ── Build JSON-RPC router ─────────────────────────────────────────────────
+    //
+    // Each instance gets a unique UUID included in every structured log line.
+    let instance_id = Uuid::new_v4().to_string();
+    let log_level = LogLevel::from_str_or_default(&cfg.log_level);
+    let logger = RequestLogger::new(instance_id.clone(), log_level);
+
+    let mcp_router = Arc::new(McpRouter::new(Arc::clone(&cache), upstream, logger));
+
+    // ── Build Streamable HTTP transport ───────────────────────────────────────
+    let validator = Arc::new(TokenValidator::new());
+    let transport_state = TransportState::new(Arc::clone(&cache), validator, mcp_router);
+    let mcp_transport = build_transport_router(transport_state);
+
     let health_state = HealthState {
         service: "mcp-gateway",
         version: env!("CARGO_PKG_VERSION"),
@@ -108,7 +146,10 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(track_metrics));
 
-    let app = Router::new().merge(health_router).merge(api_router);
+    let app = Router::new()
+        .merge(health_router)
+        .merge(api_router)
+        .merge(mcp_transport);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     tracing::info!("listening on {}", addr);
