@@ -12,6 +12,7 @@ import { useBuilderStore } from '@stores/builderStore';
 import type { BuilderStage } from '@stores/builderStore';
 import { StepIndicator } from '@components/builder/StepIndicator';
 import { UrlStep } from '@components/builder/UrlStep';
+import { AuthStep } from '@components/builder/AuthStep';
 
 // ── Step metadata ─────────────────────────────────────────────────────────────
 
@@ -66,6 +67,16 @@ export function NewServerPage() {
         return <UrlStep onContinue={handleContinue} />;
 
       case 'auth':
+        return (
+          <AuthStep
+            onContinue={handleContinue}
+            onBack={() => {
+              const prev = STEPS[currentIndex - 1];
+              if (prev !== undefined) setCurrentStage(prev.id);
+            }}
+          />
+        );
+
       case 'test':
       case 'mapping':
       case 'naming':

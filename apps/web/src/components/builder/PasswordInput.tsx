@@ -9,7 +9,7 @@ interface PasswordInputProps {
   placeholder?: string;
   autoComplete?: string;
   disabled?: boolean;
-  'aria-describedby'?: string;
+  'aria-describedby'?: string | undefined;
   className?: string;
 }
 
