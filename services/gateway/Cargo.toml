@@ -30,6 +30,9 @@ base64ct = { version = "1", features = ["alloc"] }
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 jsonpath-rust = "0.7"
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+url = "2"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

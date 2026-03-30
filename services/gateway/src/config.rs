@@ -48,6 +48,12 @@ pub struct Config {
     /// Set to `false` to disable entirely; no `X-RateLimit-*` headers are
     /// added when disabled.
     pub feature_rate_limit_enabled: bool,
+
+    /// Request log verbosity level parsed from `LOG_LEVEL` (default: `"info"`).
+    ///
+    /// Accepted values (case-insensitive): `trace`, `debug`, `info`, `warn`,
+    /// `warning`, `error`. Unrecognised values fall back to `info`.
+    pub log_level: String,
 }
 
 impl FromEnv for Config {
@@ -78,6 +84,8 @@ impl FromEnv for Config {
         let feature_rate_limit_enabled: bool =
             env_optional_parsed(&mut errors, "FEATURE_RATE_LIMIT_ENABLED", true);
 
+        let log_level = env_optional("LOG_LEVEL", "info");
+
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -93,6 +101,7 @@ impl FromEnv for Config {
                 rate_limit_calls_per_min_per_user,
                 redis_url,
                 feature_rate_limit_enabled,
+                log_level,
             }),
             // Logically unreachable: env_required pushes an error and returns None
             // whenever the variable is absent, so errors would be non-empty above.

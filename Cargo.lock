@@ -1782,6 +1782,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "moka",
+ "opentelemetry",
  "percent-encoding",
  "rand 0.8.5",
  "reqwest",
@@ -1794,6 +1795,8 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-opentelemetry",
+ "url",
  "uuid",
 ]
 

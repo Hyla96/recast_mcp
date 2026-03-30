@@ -31,6 +31,7 @@
 //! to share across request tasks.
 
 use crate::cache::{ConfigCache, ServerConfig};
+use crate::logging::{sanitise_url, RequestLogger};
 use crate::protocol::jsonrpc::ParsedRequest;
 use crate::sidecar::{ExecuteError, UpstreamExecutor};
 use crate::tool_schema::{SchemaCache, ToolsListResult};
@@ -39,6 +40,7 @@ use crate::upstream::{GatewayConfig, ToolCallParams, UpstreamRequestBuilder};
 use mcp_protocol::{error_codes, JsonRpcError, JsonRpcResponse};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Instant;
 
 // ── Gateway-specific JSON-RPC error codes ──────────────────────────────────────
 
@@ -82,6 +84,37 @@ impl UpstreamPipeline {
     }
 }
 
+// ── Internal logging metadata ─────────────────────────────────────────────────
+
+/// Logging metadata captured during a `tools/call` execution.
+///
+/// Fields are populated incrementally as execution progresses; earlier errors
+/// leave downstream fields as `None`.
+#[derive(Default)]
+struct ToolsCallLogMeta {
+    tool_name: Option<String>,
+    upstream_url: Option<String>,
+    upstream_status: Option<u16>,
+    upstream_latency_ms: Option<u64>,
+    response_size_bytes: Option<usize>,
+    transform_warnings: Vec<String>,
+}
+
+/// Return value from [`Router::handle_tools_call`].
+///
+/// Bundles the JSON-RPC result (success or error) with logging metadata so the
+/// caller can emit a structured log record.
+struct ToolsCallOutcome {
+    result: Result<Value, JsonRpcError>,
+    meta: ToolsCallLogMeta,
+}
+
+impl ToolsCallOutcome {
+    fn error(meta: ToolsCallLogMeta, err: JsonRpcError) -> Self {
+        Self { result: Err(err), meta }
+    }
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 /// Config-driven JSON-RPC request dispatcher.
@@ -93,6 +126,7 @@ pub struct Router {
     cache: Arc<ConfigCache>,
     upstream: Arc<UpstreamPipeline>,
     schema_cache: Arc<SchemaCache>,
+    logger: Arc<RequestLogger>,
 }
 
 impl Router {
@@ -100,11 +134,16 @@ impl Router {
     ///
     /// A fresh [`SchemaCache`] is allocated internally; it is shared for the
     /// lifetime of this `Router`.
-    pub fn new(cache: Arc<ConfigCache>, upstream: Arc<UpstreamPipeline>) -> Self {
+    pub fn new(
+        cache: Arc<ConfigCache>,
+        upstream: Arc<UpstreamPipeline>,
+        logger: Arc<RequestLogger>,
+    ) -> Self {
         Self {
             cache,
             upstream,
             schema_cache: Arc::new(SchemaCache::new()),
+            logger,
         }
     }
 
@@ -114,7 +153,17 @@ impl Router {
     /// filtering out responses for notifications if needed (e.g. `initialized`
     /// returns `{jsonrpc:"2.0", id:null}` per acceptance criteria rather than
     /// being silently dropped).
-    pub async fn dispatch(&self, slug: &str, request: ParsedRequest) -> JsonRpcResponse {
+    ///
+    /// `token_prefix` is the first 8 characters of the bearer token used to
+    /// authenticate the caller, safe to include in logs. Pass `None` when no
+    /// token was presented (e.g. during tests or unauthenticated endpoints).
+    pub async fn dispatch(
+        &self,
+        slug: &str,
+        request: ParsedRequest,
+        token_prefix: Option<String>,
+    ) -> JsonRpcResponse {
+        let start = Instant::now();
         let id = request.id.clone();
 
         // Resolve slug → server config (synchronous O(1) DashMap + moka reads).
@@ -126,9 +175,22 @@ impl Router {
         };
 
         match request.method.as_str() {
-            "initialize" => make_ok_response(id, self.handle_initialize(&config)),
+            "initialize" => {
+                let resp = make_ok_response(id, self.handle_initialize(&config));
+                if self.logger.is_debug_enabled() {
+                    let record = self.logger.new_record(
+                        config.id,
+                        slug,
+                        "initialize",
+                        start.elapsed().as_millis() as u64,
+                    );
+                    self.logger.log(record);
+                }
+                resp
+            }
             "initialized" => {
                 // No-op; return {jsonrpc:'2.0', id:null} as specified.
+                // Not logged (no meaningful observability value).
                 JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     result: None,
@@ -136,17 +198,53 @@ impl Router {
                     id: Some(Value::Null),
                 }
             }
-            "ping" => make_ok_response(id, json!({})),
-            "tools/list" => make_ok_response(id, self.handle_tools_list(&config)),
-            "tools/call" => match self.handle_tools_call(&config, request.params).await {
-                Ok(result) => make_ok_response(id, result),
-                Err(err) => JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    result: None,
-                    error: Some(err),
-                    id,
-                },
-            },
+            "ping" => {
+                let resp = make_ok_response(id, json!({}));
+                if self.logger.is_debug_enabled() {
+                    let record = self.logger.new_record(
+                        config.id,
+                        slug,
+                        "ping",
+                        start.elapsed().as_millis() as u64,
+                    );
+                    self.logger.log(record);
+                }
+                resp
+            }
+            "tools/list" => {
+                let result = self.handle_tools_list(&config);
+                let latency_ms = start.elapsed().as_millis() as u64;
+                let mut record =
+                    self.logger.new_record(config.id, slug, "tools/list", latency_ms);
+                record.token_prefix = token_prefix;
+                self.logger.log(record);
+                make_ok_response(id, result)
+            }
+            "tools/call" => {
+                let outcome = self.handle_tools_call(&config, request.params).await;
+                let latency_ms = start.elapsed().as_millis() as u64;
+
+                let mut record =
+                    self.logger.new_record(config.id, slug, "tools/call", latency_ms);
+                record.tool_name = outcome.meta.tool_name;
+                record.upstream_url = outcome.meta.upstream_url;
+                record.upstream_status = outcome.meta.upstream_status;
+                record.upstream_latency_ms = outcome.meta.upstream_latency_ms;
+                record.response_size_bytes = outcome.meta.response_size_bytes;
+                record.transform_warnings = outcome.meta.transform_warnings;
+                record.token_prefix = token_prefix;
+                self.logger.log(record);
+
+                match outcome.result {
+                    Ok(v) => make_ok_response(id, v),
+                    Err(err) => JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        result: None,
+                        error: Some(err),
+                        id,
+                    },
+                }
+            }
             _ => make_error_response(id, error_codes::METHOD_NOT_FOUND, "Method not found", None),
         }
     }
@@ -185,34 +283,41 @@ impl Router {
         &self,
         config: &Arc<ServerConfig>,
         params: Option<Value>,
-    ) -> Result<Value, JsonRpcError> {
+    ) -> ToolsCallOutcome {
+        let mut meta = ToolsCallLogMeta::default();
+
         // Parse tool call params from the JSON-RPC `params` field.
         let tool_params: ToolCallParams = match params {
-            Some(p) => serde_json::from_value(p).map_err(|e| JsonRpcError {
-                code: error_codes::INVALID_PARAMS,
-                message: format!("Invalid tools/call params: {e}"),
-                data: None,
-            })?,
-            None => {
-                return Err(JsonRpcError {
+            Some(p) => match serde_json::from_value(p) {
+                Ok(t) => t,
+                Err(e) => return ToolsCallOutcome::error(meta, JsonRpcError {
                     code: error_codes::INVALID_PARAMS,
-                    message: "tools/call requires a params object".to_string(),
+                    message: format!("Invalid tools/call params: {e}"),
                     data: None,
-                });
-            }
+                }),
+            },
+            None => return ToolsCallOutcome::error(meta, JsonRpcError {
+                code: error_codes::INVALID_PARAMS,
+                message: "tools/call requires a params object".to_string(),
+                data: None,
+            }),
         };
 
+        meta.tool_name = Some(tool_params.name.clone());
+
         // Deserialise config_json to check whether the requested tool exists.
-        let gw_config: GatewayConfig =
-            serde_json::from_value(config.config_json.clone()).map_err(|e| JsonRpcError {
+        let gw_config: GatewayConfig = match serde_json::from_value(config.config_json.clone()) {
+            Ok(c) => c,
+            Err(e) => return ToolsCallOutcome::error(meta, JsonRpcError {
                 code: error_codes::INTERNAL_ERROR,
                 message: format!("Invalid server config_json: {e}"),
                 data: None,
-            })?;
+            }),
+        };
 
         // Validate tool name exists. Return -32602 (Invalid Params) on unknown tool.
         if !gw_config.tools.iter().any(|t| t.name == tool_params.name) {
-            return Err(JsonRpcError {
+            return ToolsCallOutcome::error(meta, JsonRpcError {
                 code: error_codes::INVALID_PARAMS,
                 message: format!("Unknown tool: {}", tool_params.name),
                 data: None,
@@ -220,39 +325,53 @@ impl Router {
         }
 
         // S-026: Build the upstream HTTP request.
-        let upstream_req =
-            self.upstream
-                .request_builder
-                .build(config, &tool_params)
-                .map_err(|e| JsonRpcError {
-                    code: error_codes::INVALID_PARAMS,
-                    message: e.to_string(),
-                    data: None,
-                })?;
+        let upstream_req = match self.upstream.request_builder.build(config, &tool_params) {
+            Ok(r) => r,
+            Err(e) => return ToolsCallOutcome::error(meta, JsonRpcError {
+                code: error_codes::INVALID_PARAMS,
+                message: e.to_string(),
+                data: None,
+            }),
+        };
+
+        // Sanitise the upstream URL for safe logging (no auth query params).
+        meta.upstream_url = url::Url::parse(&upstream_req.url)
+            .map(|u| sanitise_url(&u))
+            .ok();
 
         // S-027: Execute via sidecar IPC or direct reqwest.
-        let upstream_resp = self
-            .upstream
-            .executor
-            .execute(config.id, upstream_req, &gw_config.auth_type)
-            .await
-            .map_err(execute_error_to_jsonrpc_error)?;
+        let upstream_resp =
+            match self.upstream.executor.execute(config.id, upstream_req, &gw_config.auth_type).await {
+                Ok(r) => r,
+                Err(e) => return ToolsCallOutcome::error(meta, execute_error_to_jsonrpc_error(e)),
+            };
+
+        meta.upstream_status = Some(upstream_resp.status);
+        meta.upstream_latency_ms = Some(upstream_resp.latency_ms);
+        meta.response_size_bytes = Some(upstream_resp.body.len());
 
         // S-028: Apply declarative transform pipeline.
         // No per-server transform pipeline config is stored yet; an empty
         // pipeline wraps the upstream body verbatim in MCP content format.
         let body_str = String::from_utf8_lossy(&upstream_resp.body);
         let empty_config = TransformPipelineConfig { ops: vec![] };
-        // Empty pipeline has no JSONPath expressions to compile; infallible.
-        #[allow(clippy::expect_used)]
-        let pipeline = TransformPipeline::new(empty_config)
-            .expect("empty TransformPipeline must build without error");
+        let pipeline = match TransformPipeline::new(empty_config) {
+            Ok(p) => p,
+            Err(e) => return ToolsCallOutcome::error(meta, JsonRpcError {
+                code: error_codes::INTERNAL_ERROR,
+                message: format!("Failed to build transform pipeline: {e}"),
+                data: None,
+            }),
+        };
 
-        let (content, warnings) = pipeline.apply(&body_str).map_err(|e| JsonRpcError {
-            code: error_codes::INTERNAL_ERROR,
-            message: format!("Transform failed: {e}"),
-            data: None,
-        })?;
+        let (content, warnings) = match pipeline.apply(&body_str) {
+            Ok(r) => r,
+            Err(e) => return ToolsCallOutcome::error(meta, JsonRpcError {
+                code: error_codes::INTERNAL_ERROR,
+                message: format!("Transform failed: {e}"),
+                data: None,
+            }),
+        };
 
         if !warnings.is_empty() {
             tracing::warn!(
@@ -263,8 +382,13 @@ impl Router {
             );
         }
 
+        meta.transform_warnings = warnings
+            .iter()
+            .map(|w| format!("[{}:{}] {}", w.op_index, w.op_name, w.message))
+            .collect();
+
         // tools/call result: {"content": [{"type":"text","text":"<json>"}]}
-        Ok(json!({ "content": content }))
+        ToolsCallOutcome { result: Ok(json!({ "content": content })), meta }
     }
 }
 
@@ -333,6 +457,7 @@ mod tests {
     use super::*;
     use crate::cache::ConfigCache;
     use crate::circuit_breaker::CircuitBreakerRegistry;
+    use crate::logging::{LogLevel, RequestLogger};
     use crate::protocol::jsonrpc::ParsedRequest;
     use crate::sidecar::{SidecarPool, UpstreamExecutor};
     use crate::upstream::UpstreamRequestBuilder;
@@ -401,7 +526,8 @@ mod tests {
         let request_builder = UpstreamRequestBuilder::with_allow_http(true);
         let upstream = UpstreamPipeline::new(executor, request_builder);
 
-        Router::new(cache, upstream)
+        let logger = RequestLogger::new(uuid::Uuid::new_v4().to_string(), LogLevel::Info);
+        Router::new(cache, upstream, logger)
     }
 
     fn make_request(method: &str, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> ParsedRequest {
@@ -421,7 +547,7 @@ mod tests {
         let router = make_router_with_config(config);
 
         let req = make_request("tools/list", Some(json!(1)), None);
-        let resp = router.dispatch("nonexistent-slug", req).await;
+        let resp = router.dispatch("nonexistent-slug", req, None).await;
 
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, CODE_SERVER_NOT_FOUND);
@@ -434,7 +560,7 @@ mod tests {
         let router = make_router_with_config(Arc::clone(&config));
 
         let req = make_request("initialize", Some(json!(1)), None);
-        let resp = router.dispatch("weather", req).await;
+        let resp = router.dispatch("weather", req, None).await;
 
         assert!(resp.error.is_none(), "expected success, got {:?}", resp.error);
         let result = resp.result.expect("expected result");
@@ -450,7 +576,7 @@ mod tests {
         let router = make_router_with_config(config);
 
         let req = make_request("initialized", None, None);
-        let resp = router.dispatch("test-server", req).await;
+        let resp = router.dispatch("test-server", req, None).await;
 
         assert_eq!(resp.jsonrpc, "2.0");
         assert!(resp.error.is_none());
@@ -464,7 +590,7 @@ mod tests {
         let router = make_router_with_config(config);
 
         let req = make_request("ping", Some(json!(42)), None);
-        let resp = router.dispatch("ping-server", req).await;
+        let resp = router.dispatch("ping-server", req, None).await;
 
         assert!(resp.error.is_none(), "expected success, got {:?}", resp.error);
         let result = resp.result.expect("expected result");
@@ -478,7 +604,7 @@ mod tests {
         let router = make_router_with_config(Arc::clone(&config));
 
         let req = make_request("tools/list", Some(json!(1)), None);
-        let resp = router.dispatch("tools-server", req).await;
+        let resp = router.dispatch("tools-server", req, None).await;
 
         assert!(resp.error.is_none(), "expected success, got {:?}", resp.error);
         let result = resp.result.expect("expected result");
@@ -494,11 +620,11 @@ mod tests {
 
         // First call populates the schema cache.
         let req1 = make_request("tools/list", Some(json!(1)), None);
-        let resp1 = router.dispatch("cache-server", req1).await;
+        let resp1 = router.dispatch("cache-server", req1, None).await;
 
         // Second call must hit the cache (same config_version).
         let req2 = make_request("tools/list", Some(json!(2)), None);
-        let resp2 = router.dispatch("cache-server", req2).await;
+        let resp2 = router.dispatch("cache-server", req2, None).await;
 
         let tools1 = resp1.result.unwrap()["tools"].clone();
         let tools2 = resp2.result.unwrap()["tools"].clone();
@@ -515,7 +641,7 @@ mod tests {
             Some(json!(1)),
             Some(json!({ "name": "nonexistent_tool", "arguments": {} })),
         );
-        let resp = router.dispatch("tool-server", req).await;
+        let resp = router.dispatch("tool-server", req, None).await;
 
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, error_codes::INVALID_PARAMS);
@@ -532,7 +658,7 @@ mod tests {
         let router = make_router_with_config(config);
 
         let req = make_request("tools/call", Some(json!(1)), None);
-        let resp = router.dispatch("param-server", req).await;
+        let resp = router.dispatch("param-server", req, None).await;
 
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, error_codes::INVALID_PARAMS);
@@ -544,7 +670,7 @@ mod tests {
         let router = make_router_with_config(config);
 
         let req = make_request("resources/list", Some(json!(1)), None);
-        let resp = router.dispatch("method-server", req).await;
+        let resp = router.dispatch("method-server", req, None).await;
 
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
@@ -580,7 +706,7 @@ mod tests {
             Some(json!(1)),
             Some(json!({ "name": "get_weather", "arguments": {} })),
         );
-        let resp = router.dispatch("weather-api", req).await;
+        let resp = router.dispatch("weather-api", req, None).await;
 
         assert!(resp.error.is_none(), "expected success, got {:?}", resp.error);
         let result = resp.result.expect("expected result");
