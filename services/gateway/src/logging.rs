@@ -19,7 +19,7 @@ use metrics::counter;
 use opentelemetry::trace::TraceContextExt;
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use url::Url;
 use uuid::Uuid;
@@ -116,6 +116,22 @@ pub struct LogRecord {
     pub trace_id: Option<String>,
 }
 
+// ── LogMsg ────────────────────────────────────────────────────────────────────
+
+/// Internal channel message sent to the background log writer.
+///
+/// `Flush` is sent during graceful shutdown; the writer replies on the
+/// provided oneshot once all prior `Record` messages have been written.
+enum LogMsg {
+    /// A structured log record to be serialised and written to stdout.
+    ///
+    /// Boxed to reduce enum variant size (clippy::large_enum_variant).
+    Record(Box<LogRecord>),
+    /// Sentinel sent during shutdown. The writer replies on `done` once all
+    /// previously enqueued records have been processed.
+    Flush(oneshot::Sender<()>),
+}
+
 // ── RequestLogger ─────────────────────────────────────────────────────────────
 
 /// Asynchronous request logger backed by a bounded `tokio::sync::mpsc` channel.
@@ -123,7 +139,7 @@ pub struct LogRecord {
 /// Records are serialised to NDJSON and written to `stdout` by a dedicated
 /// background task. [`RequestLogger::log`] is non-blocking and never panics.
 pub struct RequestLogger {
-    tx: mpsc::Sender<LogRecord>,
+    tx: mpsc::Sender<LogMsg>,
     /// UUIDv4 generated at gateway startup; included on every log record.
     pub instance_id: String,
     /// Minimum verbosity level to emit.
@@ -136,7 +152,7 @@ impl RequestLogger {
     /// The channel has a fixed capacity of 4,096 records. The spawned writer
     /// runs until all senders are dropped.
     pub fn new(instance_id: String, level: LogLevel) -> Arc<Self> {
-        let (tx, rx) = mpsc::channel::<LogRecord>(CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::channel::<LogMsg>(CHANNEL_CAPACITY);
         tokio::spawn(run_writer(rx));
         Arc::new(Self { tx, instance_id, level })
     }
@@ -146,7 +162,7 @@ impl RequestLogger {
     /// If the channel is full, the record is dropped and
     /// `gateway_log_drops_total` is incremented. This method never blocks.
     pub fn log(&self, record: LogRecord) {
-        match self.tx.try_send(record) {
+        match self.tx.try_send(LogMsg::Record(Box::new(record))) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 counter!("gateway_log_drops_total").increment(1);
@@ -154,6 +170,29 @@ impl RequestLogger {
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 // Background task has exited; nothing we can do.
                 tracing::warn!("request log writer channel is closed; dropping record");
+            }
+        }
+    }
+
+    /// Flush all pending log records to stdout.
+    ///
+    /// Sends a [`LogMsg::Flush`] sentinel through the channel and waits for
+    /// the background writer to acknowledge it. When this future resolves,
+    /// all records enqueued before the call have been written to stdout.
+    ///
+    /// Used during graceful shutdown (Phase D/E) to ensure no records are
+    /// silently dropped when the process exits.
+    pub async fn flush(&self) {
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        // Use the async send (not try_send) at shutdown time so we wait for
+        // any backpressure to clear rather than dropping the sentinel.
+        match self.tx.send(LogMsg::Flush(done_tx)).await {
+            Ok(()) => {
+                // Wait for the writer to process all records up to the sentinel.
+                let _ = done_rx.await;
+            }
+            Err(_) => {
+                // Writer has already exited; nothing left to flush.
             }
         }
     }
@@ -256,13 +295,28 @@ pub fn current_trace_id() -> Option<String> {
 // ── Background writer ─────────────────────────────────────────────────────────
 
 /// Drain the log channel and write each record as one NDJSON line to stdout.
-async fn run_writer(mut rx: mpsc::Receiver<LogRecord>) {
-    while let Some(record) = rx.recv().await {
-        match serde_json::to_string(&record) {
-            Ok(line) => println!("{line}"),
-            Err(e) => {
-                // Serialisation should be infallible for this struct.
-                tracing::error!(error = %e, "failed to serialize request log record");
+///
+/// Handles two message variants:
+/// - [`LogMsg::Record`]: serialise and print as NDJSON.
+/// - [`LogMsg::Flush`]: send on the oneshot to signal that all prior records
+///   have been written, then continue (remaining messages if any).
+async fn run_writer(mut rx: mpsc::Receiver<LogMsg>) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            LogMsg::Record(record) => {
+                match serde_json::to_string(&record) {
+                    Ok(line) => println!("{line}"),
+                    Err(e) => {
+                        // Serialisation should be infallible for this struct.
+                        tracing::error!(error = %e, "failed to serialize request log record");
+                    }
+                }
+            }
+            LogMsg::Flush(done_tx) => {
+                // All records enqueued before this sentinel have been processed.
+                // Notify the caller and keep running in case more records arrive
+                // (shouldn't happen at shutdown, but be robust).
+                let _ = done_tx.send(());
             }
         }
     }
@@ -417,7 +471,7 @@ mod tests {
         /// Test-only constructor: supply a custom sender without spawning the
         /// background writer.
         fn with_sender(
-            tx: mpsc::Sender<LogRecord>,
+            tx: mpsc::Sender<LogMsg>,
             instance_id: String,
             level: LogLevel,
         ) -> Arc<Self> {
@@ -443,7 +497,7 @@ mod tests {
     async fn channel_full_drops_record_without_blocking() {
         let instance_id = Uuid::new_v4().to_string();
         // Capacity-1 channel, no background reader — fills immediately.
-        let (tx, _rx) = mpsc::channel::<LogRecord>(1);
+        let (tx, _rx) = mpsc::channel::<LogMsg>(1);
         let logger = RequestLogger::with_sender(tx, instance_id.clone(), LogLevel::Info);
         let server_id = Uuid::new_v4();
 
@@ -464,7 +518,7 @@ mod tests {
 
     #[test]
     fn is_debug_enabled_distinguishes_levels() {
-        let (tx, _rx) = mpsc::channel::<LogRecord>(1);
+        let (tx, _rx) = mpsc::channel::<LogMsg>(1);
         let debug_logger =
             RequestLogger::with_sender(tx.clone(), "id".to_string(), LogLevel::Debug);
         let info_logger =
@@ -491,5 +545,51 @@ mod tests {
         assert_eq!(LogLevel::from_str_or_default("warning"), LogLevel::Warn);
         assert_eq!(LogLevel::from_str_or_default("error"), LogLevel::Error);
         assert_eq!(LogLevel::from_str_or_default("unknown"), LogLevel::Info);
+    }
+
+    // ── flush() ───────────────────────────────────────────────────────────────
+
+    /// `flush()` resolves after all previously-enqueued records have been
+    /// processed by the background writer.
+    #[tokio::test]
+    async fn flush_resolves_after_pending_records_are_written() {
+        let instance_id = Uuid::new_v4().to_string();
+        let logger = RequestLogger::new(instance_id, LogLevel::Info);
+        let server_id = Uuid::new_v4();
+
+        // Enqueue 20 records.
+        for i in 0..20_u64 {
+            let record = logger.new_record(server_id, "flush-server", "tools/list", i);
+            logger.log(record);
+        }
+
+        // flush() must resolve within a reasonable timeout once all records
+        // ahead of the sentinel have been processed.
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            logger.flush(),
+        )
+        .await
+        .expect("flush() must resolve within 500 ms");
+    }
+
+    /// `flush()` on a closed channel does not panic or hang.
+    #[tokio::test]
+    async fn flush_on_closed_channel_does_not_panic() {
+        let instance_id = Uuid::new_v4().to_string();
+        // Spawn a writer that exits immediately.
+        let (tx, mut rx) = mpsc::channel::<LogMsg>(1);
+        // Drop the receiver so the channel appears closed to the sender.
+        rx.close();
+
+        let logger = RequestLogger::with_sender(tx, instance_id, LogLevel::Info);
+
+        // Must return without panicking even though the channel is closed.
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            logger.flush(),
+        )
+        .await
+        .expect("flush() on closed channel must resolve immediately");
     }
 }

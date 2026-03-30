@@ -21,7 +21,10 @@
 //! All responses carry `Cache-Control: no-store`. CORS headers are added by the layer.
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use axum::{
@@ -66,6 +69,12 @@ pub struct TransportState {
     ///
     /// Production default: 60. Set to 0 in tests to avoid sleeping.
     pub sse_keepalive_secs: u64,
+    /// Set to `true` when the gateway is draining for shutdown.
+    ///
+    /// When set, new MCP requests immediately receive HTTP 503 with
+    /// `Connection: close` so in-flight handlers can complete while the load
+    /// balancer stops routing new traffic.
+    pub is_shutting_down: Arc<AtomicBool>,
 }
 
 impl TransportState {
@@ -75,6 +84,7 @@ impl TransportState {
         validator: Arc<TokenValidator>,
         router: Arc<McpRouter>,
         connection_tracker: Arc<ConnectionTracker>,
+        is_shutting_down: Arc<AtomicBool>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cache,
@@ -82,6 +92,7 @@ impl TransportState {
             router,
             connection_tracker,
             sse_keepalive_secs: 60,
+            is_shutting_down,
         })
     }
 }
@@ -99,6 +110,28 @@ pub async fn mcp_post_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // ── 0. Shutdown check ──────────────────────────────────────────────────
+    //
+    // When the gateway is draining for shutdown, reject new requests
+    // immediately with HTTP 503 and `Connection: close`. In-flight requests
+    // that arrived before the flag was set continue to completion.
+    if state.is_shutting_down.load(Ordering::SeqCst) {
+        let mut resp = build_json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            -32005,
+            "Gateway is shutting down",
+        );
+        resp.headers_mut().insert(
+            header::CONNECTION,
+            HeaderValue::from_static("close"),
+        );
+        resp.headers_mut().insert(
+            header::HeaderName::from_static("retry-after"),
+            HeaderValue::from_static("1"),
+        );
+        return resp;
+    }
+
     // ── 1. Content-Type check ──────────────────────────────────────────────
     if !is_json_content_type(&headers) {
         let mut resp = (
@@ -530,6 +563,7 @@ mod tests {
             router,
             connection_tracker: ConnectionTracker::new(10_000),
             sse_keepalive_secs,
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -715,6 +749,7 @@ mod tests {
             router: mcp_router,
             connection_tracker: crate::connections::ConnectionTracker::new(10_000),
             sse_keepalive_secs: 0,
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
         });
 
         let app = build_transport_router(state);
@@ -1249,6 +1284,7 @@ mod tests {
             router,
             connection_tracker: tracker,
             sse_keepalive_secs: 0,
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1332,5 +1368,92 @@ mod tests {
         );
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ── Shutdown check ────────────────────────────────────────────────────────
+
+    /// When `is_shutting_down` is set, all new requests receive HTTP 503 with
+    /// `Connection: close` before any auth or routing logic runs.
+    #[tokio::test]
+    async fn request_rejected_with_503_when_shutting_down() {
+        let config = make_server_config(
+            "Shutdown Test",
+            "shutdown-slug",
+            simple_config_json("http://localhost"),
+            None, // no token required
+        );
+        let state = make_transport_state(Arc::clone(&config), 0);
+
+        // Set the shutdown flag.
+        state
+            .is_shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let app = build_transport_router(state);
+        let req = make_post(
+            "shutdown-slug",
+            json!({"jsonrpc":"2.0","method":"ping","id":1}),
+            None, // no auth header
+        );
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting-down gateway must return 503"
+        );
+
+        // `Connection: close` header must be present so HTTP/1.1 clients know
+        // to close the connection after this response.
+        assert_eq!(
+            resp.headers()
+                .get(header::CONNECTION)
+                .and_then(|v| v.to_str().ok()),
+            Some("close"),
+            "Connection: close must be present during shutdown"
+        );
+
+        // Body must be a JSON-RPC error envelope, not an HTML error page.
+        let body = to_bytes(resp.into_body(), 4_096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["code"], -32005,
+            "shutdown 503 must use JSON-RPC error code -32005"
+        );
+    }
+
+    /// When `is_shutting_down` is false, requests proceed normally.
+    #[tokio::test]
+    async fn request_proceeds_normally_when_not_shutting_down() {
+        let config = make_server_config(
+            "Not Shutting",
+            "not-shutting",
+            simple_config_json("http://localhost"),
+            None,
+        );
+        let state = make_transport_state(Arc::clone(&config), 0);
+
+        // Flag is false by default in make_transport_state.
+        assert!(
+            !state
+                .is_shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "is_shutting_down must default to false"
+        );
+
+        let app = build_transport_router(state);
+        let req = make_post(
+            "not-shutting",
+            json!({"jsonrpc":"2.0","method":"ping","id":1}),
+            None, // no auth → 401, NOT 503
+        );
+        let resp = app.oneshot(req).await.unwrap();
+
+        // Should fail with 401 (no auth), not 503 (shutdown).
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "non-shutting gateway must not return 503"
+        );
     }
 }
