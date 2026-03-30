@@ -5,8 +5,10 @@
  * the response via DocumentRenderer. Manages loading, cancellation,
  * and all error states (4xx, 5xx, timeout, network error).
  *
- * The sample JSON escape hatch (TASK-008) adds textarea + JSON validation
- * when the user activates sample mode via the links rendered here.
+ * The sample JSON escape hatch (TASK-008) is fully implemented in
+ * SampleInputArea below: JSON validation with line numbers, debounced
+ * parsing, 500 KB size limit, requestIdleCallback for large pastes, and
+ * inline Document Renderer preview.
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
@@ -14,6 +16,11 @@ import { useMutation } from '@tanstack/react-query';
 import { useBuilderStore } from '@stores/builderStore';
 import { useFetchWithAuth } from '@/lib/fetchWithAuth';
 import { DocumentRenderer } from '@components/builder/DocumentRenderer';
+import {
+  parseJsonWithLineNumbers,
+  scheduleIdleValidation,
+  type JsonParseResult,
+} from '@/lib/jsonValidator';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -320,13 +327,28 @@ export function TestStep({
     setStageValid('test', mutation.data?.outcome === 'success');
   };
 
-  /** Called by SampleInputArea when the user confirms a raw JSON string. */
-  const handleUseSample = (rawJson: string) => {
-    if (rawJson.trim().length === 0) return;
-    setSampleJson(rawJson);
-    setIsUnverified(true);
-    setStageValid('test', true);
-  };
+  /**
+   * Called by SampleInputArea when the user enters valid JSON.
+   * Only the validated raw string is written to Zustand.
+   */
+  const handleSampleValid = useCallback(
+    (rawJson: string) => {
+      setSampleJson(rawJson);
+      setIsUnverified(true);
+      setStageValid('test', true);
+    },
+    [setSampleJson, setIsUnverified, setStageValid],
+  );
+
+  /**
+   * Called by SampleInputArea when the current textarea content becomes
+   * invalid (bad JSON, empty, or over size limit).
+   */
+  const handleSampleInvalid = useCallback(() => {
+    setSampleJson(null);
+    setIsUnverified(false);
+    setStageValid('test', false);
+  }, [setSampleJson, setIsUnverified, setStageValid]);
 
   // ── Derived state ───────────────────────────────────────────────────────────
 
@@ -434,13 +456,27 @@ export function TestStep({
         )}
       </div>
 
+      {/* Proactive sample response escape hatch — shown below the Test button */}
+      {!isRunning && !showSampleInput && (
+        <div>
+          <button
+            type="button"
+            data-testid="sample-response-trigger"
+            onClick={handleActivateSampleMode}
+            className="text-sm text-text-secondary hover:text-text-primary hover:underline"
+          >
+            I'll paste a sample response
+          </button>
+        </div>
+      )}
+
       {/* ── Results area ─────────────────────────────────────────────────── */}
 
       {showSampleInput ? (
         <SampleInputArea
-          onUse={handleUseSample}
+          onValid={handleSampleValid}
+          onInvalid={handleSampleInvalid}
           onBack={handleDeactivateSampleMode}
-          isUnverified={testSlice.isUnverified}
         />
       ) : (
         hasVisibleResult && (
@@ -615,30 +651,136 @@ export function TestStep({
 // ── SampleInputArea ────────────────────────────────────────────────────────────
 
 /**
- * Minimal sample JSON escape hatch. TASK-008 adds JSON validation,
- * line number display, debounced validation, and error reporting.
+ * Full sample JSON escape hatch (TASK-008).
  *
- * Owns its own uncontrolled textarea ref to avoid React 19 ref typing
- * complications when passing refs through props.
+ * - Uncontrolled textarea (ref-based) with a 300 ms manual debounce.
+ * - JSON validation via `parseJsonWithLineNumbers`; large pastes (>50 KB)
+ *   deferred to idle time via `scheduleIdleValidation`.
+ * - Pastes >500 KB are rejected inline without attempting to parse.
+ * - Valid JSON shows a green badge and renders immediately in DocumentRenderer
+ *   below the textarea. The textarea stays visible above the preview.
+ * - Only the validated raw JSON string is written to Zustand (via `onValid`).
+ * - `onInvalid` is called whenever the content becomes invalid or empty so
+ *   the parent can revoke stage validity.
  */
 interface SampleInputAreaProps {
-  /** Called with the raw textarea content when the user clicks "Use this response". */
-  onUse: (rawJson: string) => void;
+  /** Called with the raw textarea string whenever the content parses as valid JSON. */
+  onValid: (rawJson: string) => void;
+  /** Called whenever the textarea content is invalid, empty, or over the size limit. */
+  onInvalid: () => void;
   onBack: () => void;
-  isUnverified: boolean;
 }
 
-function SampleInputArea({ onUse, onBack, isUnverified }: SampleInputAreaProps) {
+function SampleInputArea({ onValid, onInvalid, onBack }: SampleInputAreaProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [hasContent, setHasContent] = useState(false);
 
-  const handleUse = () => {
-    const raw = textareaRef.current?.value ?? '';
-    onUse(raw);
-  };
+  // Manual debounce timer ref — avoids storing the raw text in React state.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cancel function for any in-flight idle callback.
+  const cancelIdleRef = useRef<(() => void) | null>(null);
+
+  // Validation state — local only; Zustand is updated only on valid parses.
+  const [parseResult, setParseResult] = useState<JsonParseResult | null>(null);
+  const [isSizeError, setIsSizeError] = useState(false);
+  const [parsedValue, setParsedValue] = useState<unknown>(null);
+  const [hasParsedValue, setHasParsedValue] = useState(false);
+
+  // Cancel pending async work on unmount.
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current !== null) clearTimeout(debounceRef.current);
+      cancelIdleRef.current?.();
+    };
+  }, []);
+
+  /**
+   * Core validation logic. Runs after the debounce fires, either
+   * synchronously (small text) or deferred to idle time (large text).
+   */
+  const doValidate = useCallback(
+    (text: string) => {
+      // Cancel any pending idle validation from a previous keystroke.
+      cancelIdleRef.current?.();
+      cancelIdleRef.current = null;
+
+      if (text.trim().length === 0) {
+        setParseResult(null);
+        setIsSizeError(false);
+        setParsedValue(null);
+        setHasParsedValue(false);
+        onInvalid();
+        return;
+      }
+
+      // Hard size limit — reject immediately without parsing.
+      const SIZE_LIMIT = 500 * 1024; // 500 KB
+      if (text.length > SIZE_LIMIT) {
+        setIsSizeError(true);
+        setParseResult(null);
+        setParsedValue(null);
+        setHasParsedValue(false);
+        onInvalid();
+        return;
+      }
+
+      setIsSizeError(false);
+
+      const run = () => {
+        const result = parseJsonWithLineNumbers(text);
+        setParseResult(result);
+        if (result.ok) {
+          setParsedValue(result.value);
+          setHasParsedValue(true);
+          onValid(text);
+        } else {
+          setParsedValue(null);
+          setHasParsedValue(false);
+          onInvalid();
+        }
+      };
+
+      // Large pastes: defer to idle time to avoid blocking user input.
+      const LARGE_THRESHOLD = 50_000;
+      if (text.length > LARGE_THRESHOLD) {
+        cancelIdleRef.current = scheduleIdleValidation(run);
+      } else {
+        run();
+      }
+    },
+    [onValid, onInvalid],
+  );
+
+  /**
+   * onChange handler for the uncontrolled textarea.
+   * Reads the current value from the event and schedules debounced validation.
+   */
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const text = e.target.value;
+      if (debounceRef.current !== null) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => doValidate(text), 300);
+    },
+    [doValidate],
+  );
+
+  // ── Derived display state ─────────────────────────────────────────────────
+
+  const isValid = parseResult?.ok === true;
+
+  const errorMessage: string | null = (() => {
+    if (isSizeError) return 'Response too large — maximum 500 KB';
+    if (parseResult?.ok === false) {
+      const { error, line } = parseResult;
+      return line !== null ? `${error} (line ${line})` : error;
+    }
+    return null;
+  })();
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-12 rounded-lg border border-border-default p-16">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-text-primary">
           Paste a sample API response
@@ -653,33 +795,55 @@ function SampleInputArea({ onUse, onBack, isUnverified }: SampleInputAreaProps) 
         </button>
       </div>
 
+      {/* Uncontrolled textarea */}
       <textarea
         ref={textareaRef}
         data-testid="sample-json-input"
         rows={12}
         spellCheck={false}
         placeholder='{"key": "value"}'
-        onChange={(e) => setHasContent(e.target.value.trim().length > 0)}
-        className="w-full rounded-md border border-border-default bg-surface-container-lowest px-12 py-8 font-mono text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-brand-500"
+        onChange={handleChange}
+        className={[
+          'w-full rounded-md border px-12 py-8 font-mono text-sm text-text-primary',
+          'bg-surface-container-lowest placeholder:text-text-secondary',
+          'focus:outline-none focus:ring-2 focus:ring-brand-500',
+          errorMessage !== null
+            ? 'border-error-DEFAULT'
+            : isValid
+              ? 'border-emerald-500'
+              : 'border-border-default',
+        ].join(' ')}
       />
 
-      {isUnverified && (
-        <p
-          role="status"
-          className="text-xs font-medium text-amber-700 dark:text-amber-400"
-        >
-          Sample response — not live-tested
+      {/* Inline error with line number */}
+      {errorMessage !== null && (
+        <p role="alert" className="text-xs text-error-DEFAULT">
+          {errorMessage}
         </p>
       )}
 
-      <button
-        type="button"
-        disabled={!hasContent}
-        onClick={handleUse}
-        className="rounded-md bg-brand-500 px-16 py-8 text-sm font-medium text-primary-on hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        Use this response
-      </button>
+      {/* Valid JSON confirmation badge */}
+      {isValid && (
+        <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+          Valid JSON
+        </p>
+      )}
+
+      {/* Inline Document Renderer preview — textarea stays visible above */}
+      {hasParsedValue && (
+        <div className="space-y-8 border-t border-border-subtle pt-12">
+          <p className="text-xs font-medium uppercase tracking-wide text-text-secondary">
+            Preview
+          </p>
+          <DocumentRenderer
+            data={parsedValue}
+            selectedPaths={new Set<string>()}
+            onFieldSelect={() => {
+              /* field selection handled in the mapping step */
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

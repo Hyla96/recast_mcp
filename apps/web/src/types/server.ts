@@ -17,6 +17,12 @@ export interface McpServer {
   callCount24h: number;
   updatedAt: string;
   createdAt: string;
+  /**
+   * True when this server was configured using a manually pasted sample
+   * response rather than a live test call. Treat as optional since older
+   * API responses may omit the field.
+   */
+  isUnverified?: boolean;
 }
 
 export interface ServersListResponse {

@@ -86,7 +86,17 @@ export function ServerCard({ server }: ServerCardProps) {
         <span className="text-base font-semibold text-text-primary truncate">
           {server.name}
         </span>
-        <StatusBadge status={server.status} />
+        <div className="flex items-center gap-8 shrink-0">
+          {server.isUnverified === true && (
+            <span
+              title="Built with a manually pasted sample response — not live-tested against the API"
+              className="inline-flex items-center px-8 py-2 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200"
+            >
+              Sample response
+            </span>
+          )}
+          <StatusBadge status={server.status} />
+        </div>
       </div>
 
       {/* Endpoint URL */}
