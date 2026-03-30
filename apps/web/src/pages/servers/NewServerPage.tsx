@@ -15,6 +15,7 @@ import { UrlStep } from '@components/builder/UrlStep';
 import { AuthStep } from '@components/builder/AuthStep';
 import { TestStep } from '@components/builder/TestStep';
 import { MappingStep } from '@components/builder/MappingStep';
+import { NamingStep } from '@components/builder/NamingStep';
 
 // ── Step metadata ─────────────────────────────────────────────────────────────
 
@@ -102,6 +103,16 @@ export function NewServerPage() {
         );
 
       case 'naming':
+        return (
+          <NamingStep
+            onContinue={handleContinue}
+            onBack={() => {
+              const prev = STEPS[currentIndex - 1];
+              if (prev !== undefined) setCurrentStage(prev.id);
+            }}
+          />
+        );
+
       case 'review':
         return (
           <div className="rounded-md bg-surface-container-low p-32 text-center text-sm text-text-secondary">
