@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Recast MCP</title>
+    <!-- Prevent FOUC: apply theme class before React hydrates -->
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('mcp-theme');
+          if (theme === 'dark') {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,103 @@
+/* Design token definitions as CSS custom properties.
+   Light mode on :root, dark mode under .dark.
+   Tailwind references these via tailwind.config.ts. */
+
+:root {
+  /* Brand scale */
+  --color-brand-50: #ffdad6;
+  --color-brand-100: rgba(168, 55, 44, 0.15);
+  --color-brand-200: rgba(237, 106, 90, 0.3);
+  --color-brand-300: #ed6a5a;
+  --color-brand-400: #c94a3f;
+  --color-brand-500: #a8372c;
+  --color-brand-600: #8e1d12;
+  --color-brand-700: #2d322b;
+  --color-brand-800: #181d16;
+  --color-brand-900: #0d110e;
+
+  /* Primary */
+  --color-primary: #a8372c;
+  --color-primary-container: #ed6a5a;
+  --color-on-primary: #ffffff;
+
+  /* Secondary */
+  --color-secondary: #15686d;
+  --color-secondary-container: #a6eff4;
+
+  /* Tertiary */
+  --color-tertiary: #616036;
+  --color-tertiary-container: #fcf7c1;
+
+  /* Surface */
+  --color-surface: #f6fbf0;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f0f5ea;
+  --color-surface-container: #eaefe4;
+  --color-surface-container-high: #e5eadf;
+  --color-surface-container-highest: #dfe4d9;
+  --color-surface-variant: #dfe4d9;
+  --color-inverse-surface: #2d322b;
+
+  /* On-surface */
+  --color-on-surface: #181d16;
+  --color-on-surface-variant: #43483f;
+  --color-inverse-on-surface: #edf2e7;
+
+  /* Outline */
+  --color-outline: #73786e;
+  --color-outline-variant: #c3c8bb;
+
+  /* Error */
+  --color-error: #ba1a1a;
+  --color-error-container: #ffdad6;
+}
+
+.dark {
+  /* Brand scale — dark overrides */
+  --color-brand-50: #93000a;
+  --color-brand-100: rgba(255, 180, 168, 0.15);
+  --color-brand-200: rgba(142, 29, 18, 0.3);
+  --color-brand-300: #8e1d12;
+  --color-brand-400: #d4887f;
+  --color-brand-500: #ffb4a8;
+  --color-brand-600: #ffcfc6;
+  --color-brand-700: #e0e4da;
+  --color-brand-800: #e0e4da;
+  --color-brand-900: #0d110e;
+
+  /* Primary */
+  --color-primary: #ffb4a8;
+  --color-primary-container: #8e1d12;
+  --color-on-primary: #690005;
+
+  /* Secondary */
+  --color-secondary: #80d4d8;
+  --color-secondary-container: #004f53;
+
+  /* Tertiary */
+  --color-tertiary: #c9c693;
+  --color-tertiary-container: #494821;
+
+  /* Surface */
+  --color-surface: #0d110e;
+  --color-surface-container-lowest: #080c09;
+  --color-surface-container-low: #151914;
+  --color-surface-container: #191d18;
+  --color-surface-container-high: #232722;
+  --color-surface-container-highest: #2e322d;
+  --color-surface-variant: #43483f;
+  --color-inverse-surface: #e0e4da;
+
+  /* On-surface */
+  --color-on-surface: #e0e4da;
+  --color-on-surface-variant: #c3c8bb;
+  --color-inverse-on-surface: #2d322b;
+
+  /* Outline */
+  --color-outline: #8d9288;
+  --color-outline-variant: #43483f;
+
+  /* Error */
+  --color-error: #ffb4ab;
+  --color-error-container: #93000a;
+}
