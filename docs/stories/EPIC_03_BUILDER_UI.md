@@ -33,6 +33,68 @@
 
 ---
 
+## Builder Navigation Model
+
+This section defines cross-cutting UX and architecture decisions that apply to all builder stories (S-043 through S-051).
+
+### Step chrome
+
+The builder flow renders a **horizontal step indicator** at the top of the builder area showing all stages: `URL → Auth → Test → Field Mapping → Naming → Review`. The current stage is highlighted with `brand-500`. Completed stages show a checkmark icon. Future stages are muted (`on-surface-variant`). The step indicator is a shared `<StepIndicator>` component (not reimplemented per story). It is display-only in MVP — clicking a step does not navigate to it.
+
+### Accordion layout model
+
+The builder uses an **accordion/collapse-previous** layout. When the user clicks "Continue" to advance to the next step:
+1. The completed step collapses to a **summary row** showing: step name, a green checkmark, and a one-line summary of the user's input (e.g., "GET https://api.example.com/customers/{id}" for the URL step, "Bearer Token" for the auth step).
+2. The summary row has an "Edit" link that re-expands the step and collapses the current step.
+3. The new step expands with a smooth transition (`transition-all duration-normal`).
+4. The browser scrolls the new step into view (`scrollIntoView({ behavior: 'smooth', block: 'start' })`).
+
+### Stage invalidation rules
+
+Changing upstream data invalidates downstream stages. These rules are enforced by the `builderStore` state machine:
+
+| Changed stage | Invalidated stages | Behavior |
+|--------------|-------------------|----------|
+| URL (method or URL) | Auth (only if host changes), Test, Field Mapping, Naming | Test response cleared. Selected fields cleared. Tool name re-derived. Auth preserved if same host. |
+| Auth | Test, Field Mapping, Naming | Test response cleared. Selected fields cleared. Tool name preserved. |
+| Test (new response) | Field Mapping, Naming | Selected fields cleared (response structure changed). Tool name preserved. |
+| Field Mapping | Naming | Tool name preserved. No invalidation. |
+| Naming | (none) | No downstream stages. |
+
+When invalidation occurs, a toast notification appears: "Your [stage] changes require re-running later steps." The invalidated stages' summary rows show an amber warning badge "Needs update".
+
+### Browser navigation
+
+The builder lives at a single route (`/servers/new`). The browser back button exits the builder entirely. This is intentional for MVP. A `beforeunload` event listener warns the user if they have unsaved builder progress: "You have unsaved changes. Leave anyway?"
+
+### Draft persistence
+
+Builder state is persisted to `sessionStorage` (not `localStorage` — drafts are per-tab, not cross-tab) on every stage completion. On mount, the builder checks `sessionStorage` for a draft and offers to resume: "You have an unfinished server. Resume where you left off?" with "Resume" and "Start fresh" buttons. Drafts expire after 24 hours. Credential values are NEVER persisted to `sessionStorage` — only the auth type selection is preserved.
+
+### Shared components
+
+The following shared components are established in S-040 and used across all builder stories:
+
+| Component | Location | Used by |
+|-----------|----------|---------|
+| `<StepIndicator>` | `src/components/builder/StepIndicator.tsx` | All builder steps |
+| `<StepLayout>` | `src/components/builder/StepLayout.tsx` | All builder steps (consistent padding, heading, Continue/Back buttons) |
+| `<PasswordInput>` | `src/components/ui/PasswordInput.tsx` | S-044 (all credential fields) |
+| `<EncryptedFieldBadge>` | `src/components/ui/EncryptedFieldBadge.tsx` | S-044 (lock icon + tooltip) |
+| `<SegmentedControl>` | `src/components/ui/SegmentedControl.tsx` | S-044, S-045, S-046 |
+| `<JsonValidator>` | `src/lib/jsonValidator.ts` | S-046, S-051 (shared parse + line-number extraction) |
+| `<Toast>` | `src/components/ui/Toast.tsx` | Global (stage invalidation, save confirmations) |
+
+### Error boundary strategy
+
+Every builder step is wrapped in a React Error Boundary (`<StepErrorBoundary>`). The fallback UI shows: "Something went wrong in this step" with a "Reset this step" button that clears the step's data in `builderStore` and re-renders. The Document Renderer (S-047) has its own dedicated error boundary with fallback: "Could not render this response. Try pasting a simpler JSON sample." This is critical because the renderer processes arbitrary `data: unknown` recursively.
+
+### Scroll restoration
+
+On step transitions, the browser scrolls to the top of the new step. React Router's built-in scroll restoration is configured in S-040 for route-level navigation. For in-page step transitions, `scrollIntoView` is called explicitly.
+
+---
+
 ## S-040: App Shell and Routing
 
 **Story ID:** S-040
@@ -63,15 +125,32 @@ As the engineering team, we need a fully scaffolded React 19 application with Vi
 8. Path aliases are configured in both `vite.config.ts` and `tsconfig.json`: `@/` maps to `src/`, `@components/` maps to `src/components/`, `@stores/` maps to `src/stores/`, `@hooks/` maps to `src/hooks/`. All imports in the scaffolded files use aliases, not relative paths.
 9. A 404 catch-all route renders a "Page not found" screen with a link back to `/dashboard`. It does not render the authenticated shell.
 10. `npm run build` produces a Vite production bundle with no warnings. Bundle is tree-shaken. React Router and TailwindCSS are the only non-dev dependencies added in this story.
+11. **Vitest + React Testing Library** are configured as dev dependencies. `vitest.config.ts` extends `vite.config.ts`. A sample test file `src/lib/__tests__/sample.test.ts` passes with `npm run test`. The `test` script is added to `package.json`. `@testing-library/react`, `@testing-library/jest-dom`, and `@testing-library/user-event` are installed.
+12. **`@types/react` and `@types/react-dom`** are upgraded to `^19.x` for React 19 type compatibility. The `forwardRef` wrapper is not used anywhere — React 19 passes `ref` as a regular prop.
+13. **TypeScript target** is updated to `ES2022` (aligned with technical notes). `tsconfig.json` includes `"noImplicitAny": true`, `"strictNullChecks": true`, `"noUncheckedIndexedAccess": true`, `"exactOptionalPropertyTypes": true`.
+14. A global **React Error Boundary** component (`<AppErrorBoundary>`) is implemented wrapping the router outlet. A specialized `<StepErrorBoundary>` variant is created for builder steps with step-specific reset logic.
+15. A **toast notification system** is implemented as a React context + portal. Toasts render at bottom-right, support success/error/info variants, auto-dismiss after 5 seconds (errors persist), and use `aria-live="polite"` (success/info) or `aria-live="assertive"` (errors). Maximum 3 visible toasts stacked.
+16. The builder **shared components** are scaffolded as empty shells: `<StepIndicator>`, `<StepLayout>`, `<PasswordInput>`, `<EncryptedFieldBadge>`, `<SegmentedControl>`, `<Toast>`. Their interfaces are typed but implementations are placeholder.
+17. A `src/styles/tokens.css` file defines all design system tokens as CSS custom properties on `:root` (light) and `.dark` (dark), including the full `brand-*` numeric scale. Tailwind references these variables via `tailwind.config.ts`.
+18. A **`vite-env.d.ts`** file declares custom environment variable types: `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_API_BASE_URL`, `VITE_WS_BASE_URL`.
+19. **Scroll restoration** is configured on `createBrowserRouter` for route-level navigation.
 
 ### Technical Notes
 
 - Use `createBrowserRouter` with `RouterProvider` (not `BrowserRouter`) for future data router compatibility.
 - Implement layout routes via React Router's nested route + `<Outlet />` pattern. The authenticated shell is a layout route; `/login` and `/` are siblings outside it.
-- Dark mode toggle: read `localStorage` in an inline `<script>` in `index.html` before React hydrates, to avoid FOUC. Store the value under key `"mcp-theme"`.
+- Dark mode toggle: read `localStorage` in an inline `<script>` in `index.html` before React hydrates, to avoid FOUC. Store the value under key `"mcp-theme"`. The inline `<script>` tag must be a plain `<script>` tag (NO `type="module"`, NO `defer`, NO `async`). It reads `localStorage.getItem('mcp-theme')`, falls back to `window.matchMedia('(prefers-color-scheme: dark)').matches`, and sets `document.documentElement.classList.add('dark')` before React mounts. Example:
+  ```html
+  <script>
+    (function(){var t=localStorage.getItem('mcp-theme');if(t==='dark'||(t==null&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark');document.documentElement.setAttribute('data-theme','dark')}else{document.documentElement.setAttribute('data-theme','light')}})();
+  </script>
+  ```
 - Do not use `@apply` in CSS files except for base resets. Keep utility classes in JSX.
 - TypeScript target: `"ES2022"`. Module: `"ESNext"`. `moduleResolution: "Bundler"`.
 - Zustand store slice for UI state (`theme`, `sidebarOpen`) is scaffolded in this story even though nothing consumes it yet.
+- Zustand store uses `immer` middleware from the start. Install `immer` as a dependency. All builder store slices use `produce` for state updates, which avoids painful spread chains with `noUncheckedIndexedAccess` enabled.
+- The Zustand `builderStore` is defined with explicit slice boundaries: `urlSlice`, `authSlice`, `testSlice`, `mappingSlice`, `namingSlice`, and a top-level `currentStage` + `stageValidation` map. Each slice is independently resettable.
+- Mobile navigation: the nav bar collapses to a hamburger menu on mobile (`< 768px`). The dark mode toggle is accessible inside the mobile menu drawer AND as a standalone toggle in the hamburger menu header.
 
 ---
 
@@ -96,7 +175,7 @@ As the engineering team, we need Clerk integrated as the identity provider so th
 3. The `/login` route also exposes a "Create account" path that renders Clerk's `<SignUp>` component inline or via tab toggle. Successful sign-up redirects to `/dashboard`.
 4. All routes except `/` and `/login` are protected. Unauthenticated requests to any protected route redirect to `/login` with a `redirect_url` query param so the user is returned to the originally requested URL after sign-in.
 5. The authenticated shell nav bar renders a user profile dropdown. The dropdown contains: user's avatar (from Clerk), display name, email address (read-only), and a "Sign out" button. Clicking "Sign out" calls `signOut()` and redirects to `/login`.
-6. `useAuth().getToken()` is available app-wide and used by Tanstack Query's default query function to attach `Authorization: Bearer <token>` to all API requests. A custom `queryClient` with a `defaultOptions.queries.queryFn` wrapper handles this centrally; individual query hooks do not manage auth headers.
+6. `useAuth().getToken()` is available app-wide. A shared `fetchWithAuth` utility wraps `fetch` and calls `getToken()` before each request to attach `Authorization: Bearer <token>`. Clerk's SDK caches tokens internally — do not add a module-level token cache. Individual `useQuery`/`useMutation` hooks use `fetchWithAuth` in their `queryFn`/`mutationFn`. A `queryClient` is configured with sensible defaults: `staleTime: 30_000` (30s), `retry: 1` (fail fast), `gcTime: 300_000` (5 min). Individual queries override these as needed.
 7. Clerk's `<UserButton>` or equivalent is used for the profile dropdown, styled to match the app's design tokens. The avatar falls back to the user's initials if no profile image is set.
 8. TypeScript: `useUser()` and `useAuth()` return values are consumed with proper null guards. No `!` non-null assertions on Clerk hooks.
 9. A Clerk `<RedirectToSignIn>` guard component wraps the authenticated layout route in the router config. It is not implemented as an ad-hoc check in individual page components.
@@ -106,9 +185,9 @@ As the engineering team, we need Clerk integrated as the identity provider so th
 
 - Use Clerk's React SDK v5+ (compatible with React 19's concurrent mode).
 - Do not use Clerk's `withAuth` HOC (deprecated). Use hooks exclusively.
-- The `queryClient` auth wrapper: intercept `queryFn` to call `getToken({ template: 'backend' })` before each fetch. Cache the token in a module-level variable; refresh only when the call returns 401. This avoids a `getToken()` round-trip on every query.
+- `fetchWithAuth` calls `getToken()` on every request. Clerk's React SDK caches the token internally and only refreshes when needed — there is no performance penalty. Do not cache the token in a module-level variable (causes stale-token bugs on session refresh). Handle 401 responses globally: if any `fetchWithAuth` call receives a 401, call `signOut()` and redirect to `/login`. This covers the case where Clerk's session expires between token cache refreshes.
 - Session expiry: Clerk handles token refresh automatically. The app does not need to implement refresh logic, but should handle 401 responses from the backend by calling `signOut()` and redirecting.
-- Environment variables: document all required env vars in a `.env.example` file committed to the repo.
+- Environment variables required: `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_API_BASE_URL`, `VITE_WS_BASE_URL`. All documented in `.env.example`.
 
 ---
 
@@ -148,6 +227,11 @@ As a user, I want to see all my MCP servers at a glance with their current statu
 - Server list state lives entirely in Tanstack Query cache. Do not duplicate it in Zustand.
 - Relative time formatting: compute the diff from `Date.now()`. Use thresholds: `< 60s` → "just now", `< 60m` → "X minutes ago", `< 24h` → "X hours ago", `< 48h` → "Yesterday", else → absolute date `MMM D, YYYY`.
 - Card hover state: `ring-2 ring-brand-500` on hover/focus for clear interactive affordance.
+- WebSocket message schema for `server.status_changed`: `{ type: "server.status_changed", payload: { serverId: string, status: "active" | "error" | "inactive", timestamp: string } }`. The hook validates the message shape before calling `invalidateQueries`.
+- WebSocket URL is derived from `VITE_WS_BASE_URL` environment variable: `${VITE_WS_BASE_URL}/ws/servers`.
+- Debounce WebSocket-triggered invalidations: if multiple `server.status_changed` events arrive within 500ms, coalesce them into a single `invalidateQueries` call. This prevents re-render storms for users with many active servers.
+- Use `useEffectEvent` (React 19) for the WebSocket message handler inside the `useServerStatusSocket` hook. This avoids putting `queryClient` in the `useEffect` dependency array (which would cause reconnections on every render).
+- For the server list at scale (100+ servers), note that `@tanstack/virtual` should be integrated as a follow-up if performance degrades. Not in scope for this story.
 
 ---
 
@@ -208,7 +292,7 @@ This is the first stage of the builder flow (`/servers/new`, step 1 of N). It mu
 - Use the browser's `URL` constructor for initial parsing — it handles most edge cases and throws on truly malformed inputs. Layer the path/query param detection on top of the parsed result.
 - The path param regex: `/\{([a-zA-Z_][a-zA-Z0-9_-]*)\}/g`. Do not attempt to detect OpenAPI-style `:param` syntax in this story (potential future story).
 - Type inference for query params: attempt `Number(value)` first, then check `"true"/"false"`, then fall back to `string`. Never infer `null` or `undefined`.
-- Debounce: use `useDeferredValue` from React 19 or a `setTimeout`-based debounce hook. Do not reach for a third-party debounce library for this single use case.
+- Debounce: use a `setTimeout`-based debounce hook (`useDebounce`) for the URL parsing. `useDeferredValue` is not appropriate here — it defers rendering, not computation. The 150ms debounce prevents excessive re-parsing during rapid typing.
 - Zustand builder store: model the builder flow as a state machine with stages `['url', 'auth', 'test', 'mapping', 'naming', 'review']`. The current stage and each stage's data are stored separately so partial resets are possible.
 
 ---
@@ -228,11 +312,11 @@ As a user, I want to configure authentication for my API by selecting an auth ty
 ### Acceptance Criteria
 
 1. The auth configuration panel is step 2 of the builder flow. It renders below the URL/params section (or as the next visible step in a stepped layout) after the user clicks the "Continue" button from S-043. The panel has `data-testid="auth-panel"`.
-2. An auth type selector renders four options as a segmented control or radio group: `None`, `Bearer Token`, `API Key`, `Basic Auth`. Default selection is `None`. Changing the selection shows the corresponding credential inputs and hides the others with no page jump (content appears in place, smoothly via `transition-all duration-200`).
+2. An auth type selector renders four options as a segmented control: `None`, `Bearer Token`, `API Key`, `Basic Auth`. Default selection is `None`. The `<SegmentedControl>` component (from S-040 shared components) implements `role="radiogroup"` with each option as `role="radio"`. Arrow keys navigate between options (single tab stop for the group). Changing the selection shows the corresponding credential inputs and hides the others with no page jump (content appears in place, smoothly via `transition-all duration-normal`). The component has `data-testid="auth-type-selector"`.
 3. **Bearer Token configuration:**
    - A single input labeled "Bearer token" with `type="password"` (characters masked by default).
-   - A "Show / Hide" toggle button with `aria-label="Show bearer token"` / `aria-label="Hide bearer token"`.
-   - A lock icon (`aria-hidden="true"`) with an adjacent tooltip reading "Encrypted at rest using AES-256. Never logged or displayed again after save." The tooltip is visible on hover and on focus of the lock icon (keyboard accessible).
+   - A "Show / Hide" toggle button using the shared `<PasswordInput>` component. The toggle is `type="button"` (does not submit forms), with `aria-label="Show bearer token"` / `aria-label="Hide bearer token"`, keyboard accessible (Enter/Space activates).
+   - A lock icon using the shared `<EncryptedFieldBadge>` component with tooltip reading "Encrypted at rest using AES-256. Never logged or displayed again after save." The tooltip is visible on hover and on focus (keyboard accessible).
    - Validation on blur: if the field is non-empty and fewer than 10 characters, show inline error "Token appears too short — check you copied the full value."
 4. **API Key configuration:**
    - A toggle to choose placement: "Header" or "Query parameter" (default: "Header"). `data-testid="apikey-placement-toggle"`.
@@ -246,7 +330,7 @@ As a user, I want to configure authentication for my API by selecting an auth ty
 6. All credential inputs are `autocomplete="off"` and `autocomplete="new-password"` as appropriate to prevent browser autofill from populating API credentials with personal account credentials.
 7. The selected auth type and credential values (except masked display) are stored in the `builderStore` auth slice. Credential values in the store are stored as-entered (plain text in memory); they are never written to `localStorage` or `sessionStorage`. They are transmitted to the backend only over HTTPS as part of the test call (S-045) or the deploy action (EPIC-04).
 8. A "Back" link returns to the URL step without losing URL/params data. The "Continue" button advances to test call execution (S-045). The Continue button is enabled when auth type is `None` OR when the selected auth type has all required fields filled and passing validation.
-9. When auth type is `None`, a helper text reads: "No authentication. Proceed only if the endpoint is publicly accessible." in muted warning amber text.
+9. When auth type is `None`, a helper text with `role="status"` and `aria-live="polite"` reads: "No authentication. Proceed only if the endpoint is publicly accessible." in muted warning amber text. Screen readers announce this when the selection changes to `None`.
 10. Each credential input's Show/Hide toggle is keyboard accessible (Tab reaches it, Enter or Space activates it). The button must not submit the form.
 
 ### Technical Notes
@@ -280,12 +364,12 @@ This is the critical trust moment in the builder flow. The test must be transpar
    - Disables the button and replaces its label with a spinner and "Testing..." text.
    - Shows a "Cancel" link adjacent to the button (`data-testid="test-call-cancel"`).
    - Sends `POST /api/v1/proxy/test` to the platform backend with the payload: `{ url, method, pathParams, queryParams, auth, body? }`. The backend executes the actual HTTP call to the upstream API and returns the proxied response.
-4. **Success response (2xx from upstream):** the results area renders the parsed JSON response via the Document Renderer (S-047). The test section header updates to show a green checkmark and "200 OK" (or the actual status code). The response is stored in `builderStore.testResponse`.
+4. **Success response (2xx from upstream):** the results area renders the parsed JSON response via the Document Renderer (S-047). The test section header updates to show a green checkmark and "200 OK" (or the actual status code). The response is stored in `builderStore.testResponse`. After a successful test, focus is programmatically moved to the Document Renderer heading (`<h3>` with `tabIndex={-1}`) so keyboard users can immediately navigate the rendered output.
 5. **4xx response from upstream:** display a red banner with "API returned [status code]: [status text]". Below the banner, render the response body as-is (could be JSON or plain text, render accordingly). Do not proceed the user automatically; show a "Try different values" suggestion.
 6. **5xx response from upstream:** display a red banner "The upstream API returned a server error ([status code]). This may be temporary — try again in a moment." with a "Retry" button.
 7. **Timeout (no response within 30 seconds):** display "The request timed out after 30 seconds. The API may be unreachable or taking too long." Show "Try again" and "Use sample response instead" (linking to S-046 behavior).
 8. **Connectivity error (platform could not reach the host):** display "Could not connect to [host]. The API may require a VPN, be behind a firewall, or the URL may be incorrect." Show "Use sample response instead" link prominently (`data-testid="use-sample-response-link"`).
-9. **Cancellation:** clicking "Cancel" sends `DELETE /api/v1/proxy/test/:requestId` if the platform API supports it, and immediately resets the UI to the pre-test state. The Cancel link is only visible while a test is in progress.
+9. **Cancellation:** clicking "Cancel" aborts the in-flight request client-side. The Cancel link is only visible while a test is in progress.
 10. After a successful test, a "Continue to field mapping" button appears (`data-testid="proceed-to-mapping-btn"`). After a failed test, the "Continue" button is replaced with "Skip test and use sample response" (which activates S-046) and "Fix and retry". The user cannot proceed to field mapping without either a successful test or a valid sample JSON (from S-046).
 11. The test call is managed via a Tanstack Query `useMutation`. Loading, success, and error states are driven by the mutation state, not local `useState` booleans. Retry logic: no automatic retries (the user decides when to retry).
 12. The 30-second timeout is enforced client-side via `AbortController`. If the fetch is aborted by timeout, the error falls into the "timeout" branch (AC 7), not the generic error branch.
@@ -293,7 +377,7 @@ This is the critical trust moment in the builder flow. The test must be transpar
 ### Technical Notes
 
 - The platform's proxy endpoint (`/api/v1/proxy/test`) is responsible for the actual HTTP call. The frontend never calls the upstream API directly (CORS, credential security). The frontend sends credentials to the platform backend over HTTPS; the backend makes the upstream call server-side.
-- Request ID: the `POST /api/v1/proxy/test` response should return a `requestId` immediately (202 pattern) or synchronously (200 pattern). For MVP, synchronous is acceptable. For cancel support, store the `requestId` in Zustand.
+- Request ID and cancellation: The proxy endpoint (`POST /api/v1/proxy/test`) is **synchronous for MVP** — it blocks until the upstream response arrives. This means the `DELETE /api/v1/proxy/test/:requestId` cancel endpoint is NOT available in MVP. Client-side cancellation via `AbortController` aborts the `fetch` call to the platform backend, which in turn should abort the upstream request (platform backend must propagate the abort signal). Server-side cancel with request ID is a post-MVP enhancement.
 - The `useMutation` `mutationFn` returns a discriminated union result type:
   ```typescript
   type TestCallResult =
@@ -304,6 +388,8 @@ This is the critical trust moment in the builder flow. The test must be transpar
     | { outcome: 'connectivity_error'; host: string };
   ```
   The `onSuccess` callback of `useMutation` receives this union and branches on `outcome`. Do not use `onError` for non-network errors (4xx, 5xx, timeouts that resolved cleanly from the proxy).
+- The `mutationFn` must catch `AbortError` from the `AbortController` timeout and return `{ outcome: 'timeout' }` rather than throwing. This keeps all outcomes in the `onSuccess` callback. Only actual network failures (fetch throws for reasons other than abort) should fall through to `onError`.
+- Platform API errors (platform itself is down, returns 500): handle in `onError`. Show: "The Recast platform is temporarily unavailable. This is not an issue with your API." with a "Try again" button.
 
 ---
 
@@ -333,6 +419,9 @@ As a user with an API behind a firewall, VPN, or otherwise unreachable from the 
 ### Technical Notes
 
 - JSON parse error line number extraction: `JSON.parse` throws a `SyntaxError` with a message like `"Unexpected token } in JSON at position 47"`. Extract the position integer, then count `\n` characters in `text.slice(0, position)` to get the line number. This is not always precise for all JSON.parse implementations — document the approximation in a code comment.
+- JSON validation and line-number extraction use the shared `parseJsonWithLineNumbers(input: string): { ok: true; value: unknown } | { ok: false; error: string; line: number }` utility from `src/lib/jsonValidator.ts`. This function is shared with S-051. Do not implement the parsing logic inline.
+- For very large pastes (approaching 500KB), schedule validation via `requestIdleCallback` instead of a simple `setTimeout` debounce. This prevents main-thread blocking on large inputs.
+- The type stored in Zustand for `testResponse` is `unknown` (same as `DocumentRenderer`'s `data` prop). Both the live test path and the sample JSON path write to the same store field.
 - The `<textarea>` should not use a controlled React input for large pastes (performance). Use an `uncontrolled` pattern with a `ref` and `onChange` for debounced validation only. Store the validated parsed value (not the raw string) in Zustand.
 - Do not attempt to syntax-highlight the textarea. That is a post-MVP enhancement.
 
@@ -377,15 +466,18 @@ The Document Renderer is the centerpiece of the builder UX. It must make arbitra
 7. Selected values (managed by S-048's state) are highlighted with `bg-brand-100 dark:bg-brand-900 ring-2 ring-brand-500`. The renderer receives a `selectedPaths: Set<string>` prop and applies this highlight without internal state.
 8. The renderer handles pathological inputs gracefully: `null` top-level data renders "No data", `[]` top-level renders "Empty response", non-object/non-array top-level scalars render the formatted value with label "Response".
 9. The renderer is a pure presentational component. It derives all display state from props. It does not fetch data, read from Zustand, or manage side effects. It can be used in Storybook with mock data in isolation.
-10. Rendering a 200-field, 3-level-deep JSON object completes in under 100ms on a mid-range laptop (no virtualization required at this scale; do not add `react-virtual` prematurely).
+10. Rendering a 200-field, 3-level-deep JSON object completes in under 100ms on a mid-range laptop. For responses larger than 100KB (up to the 500KB limit from S-046), progressive rendering is acceptable: render the first two levels immediately, then render deeper levels on the next frame via `requestIdleCallback` or `startTransition`. The 100ms budget applies to the initial visible render, not the full tree. Do not add `react-virtual` prematurely — but add a code comment noting it as the escape hatch for pathological cases.
+11. The Document Renderer is wrapped in a dedicated `<RendererErrorBoundary>` (distinct from the step-level error boundary). The fallback UI shows: "Could not render this response" with options to "View raw JSON" (shows the raw `JSON.stringify(data, null, 2)` in a `<pre>` block) and "Try a different response". This is critical because the renderer processes arbitrary `data: unknown` and applies multiple formatters recursively — malformed input that passes `JSON.parse` could trigger unexpected formatter behavior.
 
 ### Technical Notes
 
 - Implement `formatFieldName(key: string): string` and `formatValue(key: string, value: unknown): string | ReactNode` as pure functions in `src/lib/rendererFormatters.ts`. Unit test these functions exhaustively — they are the core logic of the renderer.
-- JSONPath generation for `data-jsonpath`: implement a recursive `buildJsonPath(key: string | number, parentPath: string): string` function. Array element paths: `$.orders[0].id`. Object paths: `$.customer.name`. Root: `$`.
+- JSONPath generation for `data-jsonpath`: implement a recursive `buildJsonPath(key: string | number, parentPath: string): string` function. Array element paths: `$.orders[0].id`. Object paths: `$.customer.name`. Root: `$`. JSONPath computation (`buildJsonPath`) is performed once during the recursive render pass, not recomputed on every re-render. Paths are stored as `data-jsonpath` attributes on DOM elements and read from the DOM on click events — they are never stored in React state.
 - Do not use a third-party JSON-to-HTML library. The custom renderer is a core product differentiator and must be fully controlled.
-- Collapsible sections: use a `<details>`/`<summary>` element pattern for native accessibility support, styled with Tailwind to match the design. Do not implement custom open/close logic with `useState` for this.
-- Table rendering for arrays of objects: cap column count at 8; additional columns are hidden with a "Show more columns" control.
+- Collapsible sections: use a `<details>`/`<summary>` element pattern for native accessibility support, styled with Tailwind to match the design. Do not implement custom open/close logic with `useState` for this. The `depth` prop is passed through recursion. `<details open={depth < 2}>` controls the initial expansion. The `depth` starts at 0 for the root object.
+- Table rendering for arrays of objects: cap column count at 8; additional columns are hidden with a "Show more columns" control. On mobile (`< 768px`), wrap the `<table>` in a `<div>` with `overflow-x: auto` for horizontal scrolling and cap visible columns at 3 (not 8) with "Show more columns" control.
+- `React.memo` wraps the inner `<RendererValue>` component to prevent re-renders of unchanged subtrees when `selectedPaths` changes. Alternatively, if the React Compiler is configured, document that memo is not needed.
+- Consider using `<Activity mode="hidden">` (React 19.2) to keep the Document Renderer mounted but hidden when navigating to later builder steps. This avoids re-rendering the full JSON tree when the user navigates back to the field mapping step. This is an optimization, not a requirement for initial implementation.
 
 ---
 
@@ -412,15 +504,17 @@ As a user, I want to click on any value in the rendered API response and have it
 3. Clicking the same value a second time removes the field from the Selected Fields panel (toggle behavior). Clicking a second distinct element with the same JSONPath as an already-selected field also removes it (they refer to the same field).
 4. Duplicate field names are prevented: if the user edits a field name input to a name that already exists in the Selected Fields panel, the input gets a red ring and inline error "A field named '[name]' already exists." The conflict is resolved on the duplicate, not the original.
 5. The field name input accepts only: letters, numbers, spaces, underscores, hyphens. Max length: 64 characters. Validation runs on every keystroke (no debounce needed — it's a short input). Invalid characters are rejected silently (the character simply does not appear). An empty field name on blur reverts to the last valid value.
-6. Fields in the Selected Fields panel can be reordered via drag-and-drop. Use the HTML Drag and Drop API (no library for this story). Each chip has a drag handle icon (six dots) on the left with `aria-label="Drag to reorder"`. The drag target drop zone is the full chip row. A visual insertion indicator (2px brand-colored line) shows where the dragged item will land.
+6. Fields in the Selected Fields panel can be reordered via drag-and-drop AND keyboard. **Pointer reorder:** Use the HTML Drag and Drop API. Each chip has a drag handle icon (six dots) on the left with `aria-label="Drag to reorder"`. The drag target drop zone is the full chip row. A visual insertion indicator (2px brand-colored line) shows where the dragged item will land. **Keyboard reorder:** When the drag handle is focused, Arrow Up/Down moves the item. Enter/Space activates "drag mode" (visual indicator shows), Arrow Up/Down repositions, Enter/Space confirms, Escape cancels. An `aria-live="polite"` region announces position changes: "[Field name] moved to position [N] of [total]". **Touch devices:** The HTML DnD API does not fire on touch screens. On touch devices, the drag handle is hidden and replaced with explicit "Move up" / "Move down" icon buttons. Detect touch capability via `matchMedia('(pointer: coarse)')`.
 7. The Selected Fields panel shows a count: "N fields selected" in the panel header. When zero fields are selected, the panel shows an empty state: "Click any value in the response to add it as a tool output field." in muted text. The count and empty state are `data-testid="field-count"` and `data-testid="fields-empty-state"` respectively.
 8. All selected fields (JSONPath, display name, type, example, order) are stored in `builderStore.selectedFields: SelectedField[]`. The order in the array matches the visual order in the panel.
 9. The "Continue" button advancing to tool naming (S-050) is disabled when `selectedFields.length === 0`. It displays a tooltip on hover: "Select at least one field to continue." when disabled.
 10. The layout is a two-column split on desktop (`>= 1280px`): Document Renderer on the left (60% width), Selected Fields panel on the right (40% width). On tablet and mobile, the Selected Fields panel renders below the Document Renderer as a full-width section.
+11. A "Clear all" button appears in the Selected Fields panel header when 2 or more fields are selected. Clicking it shows a confirmation: "Remove all [N] selected fields?" with "Clear all" (destructive) and "Cancel" buttons. `data-testid="clear-all-fields-btn"`.
 
 ### Technical Notes
 
 - Selected field state is the source of truth in Zustand. The Document Renderer's `selectedPaths` prop is derived from `builderStore.selectedFields.map(f => f.jsonPath)` and passed down. No prop drilling through intermediate components — use a selector hook `useSelectedPaths()`.
+- The `useSelectedPaths()` selector must return a **stable** `Set` reference. Implement as a Zustand computed selector with `useMemo` or `useRef`-based memoization. Creating `new Set(selectedFields.map(f => f.jsonPath))` on every render causes the `DocumentRenderer` to re-render unnecessarily (Set reference equality fails even when contents are identical). Compare the array contents and only create a new Set when paths actually change.
 - Drag and drop: implement as a standalone `useDragToReorder<T>(items: T[], onReorder: (newItems: T[]) => void)` hook. It returns event handlers for `onDragStart`, `onDragOver`, `onDrop`, and `onDragEnd` that are spread onto each item and the container. The hook manages `draggedIndex` and `dropIndex` in local state.
 - Type inference for chips: `typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)` → `date`. `Array.isArray(value)` → `array`. Otherwise, `typeof value` for string/number/boolean.
 - The `SelectedField` interface:
@@ -470,6 +564,11 @@ As a user, when I click on a value inside an array element (e.g., the `id` field
 - The dialog is a modal overlay, not an inline expand. Use `<dialog>` element with `showModal()` for native browser focus trapping. Style with Tailwind.
 - Preview values: map `response.orders.map(o => o.id)` (conceptually). In practice, evaluate the path up to the field for each array item.
 
+### Dialog focus management
+
+11. When the dialog closes (either action), focus returns to the element in the Document Renderer that triggered the dialog (the clicked value). This is implemented by storing a ref to the trigger element before opening the dialog and calling `.focus()` on dialog close.
+12. When clicking a value that is inside an array AND is already selected (by its normalized path), the dialog is NOT shown — the field is simply toggled off (removed), consistent with S-048 AC 3 toggle behavior. The dialog only appears for new selections.
+
 ---
 
 ## S-050: Tool Naming and Description Form
@@ -508,7 +607,7 @@ As a user, I want to give my MCP tool a name and optional description so that Cl
 4. A "Description" textarea (`data-testid="tool-description-input"`) with:
    - Label: "Description (optional)"
    - Helper text: "Explain what this tool does in plain English. Claude uses this to decide when to call it."
-   - `maxLength={500}`. A character counter shows "N / 500" below the textarea, updating on every keystroke.
+   - `maxLength={500}`. A character counter shows "N / 500" below the textarea, updating on every keystroke. The character counter has `aria-live="polite"` so screen readers announce the count as it approaches the limit (announce at 400, 450, 475, and 500 characters).
    - No validation error — the field is optional.
 5. A preview section below the form (`data-testid="tool-preview"`) shows how the tool will appear in Claude Desktop's tool picker:
    - A mock Claude Desktop UI element (styled to resemble Claude's tool card UI) showing the tool name in monospace font and the description in regular text.
@@ -521,7 +620,7 @@ As a user, I want to give my MCP tool a name and optional description so that Cl
 ### Technical Notes
 
 - The character rejection on keystroke is implemented via a controlled input's `onChange` handler that strips disallowed characters before updating state. Do not use `onKeyDown` with `preventDefault` — it breaks paste and mobile IME input.
-- Tool name uniqueness check: use `useQuery` with `enabled: toolName.length >= 3 && isValidToolName(toolName)`. Debounce the `toolName` input value with a 500ms `useDeferredValue` before passing it to the query key.
+- Tool name uniqueness check: use `useQuery` with `enabled: toolName.length >= 3 && isValidToolName(toolName)`. Debounce the `toolName` value with a **`setTimeout`-based debounce hook** (`useDebounce(toolName, 500)`) before passing it to the query key. Do NOT use `useDeferredValue` — it defers rendering, not network calls, and will not prevent the query from firing on every keystroke.
 - The Claude Desktop mock preview: use a static mockup div, not an iframe or external dependency. It is a design component, not a real integration.
 
 ---
@@ -550,9 +649,12 @@ As a user integrating with a POST, PUT, or PATCH API endpoint, I want to define 
 8. When the test call is executed (S-045), the request body is included in the proxy payload. Template variables in the body are substituted with the example values entered by the user in the parameter inputs section of S-045.
 9. If the method changes from POST to GET (user switches the dropdown in S-043), the request body section hides and `builderStore.requestBody` is set to `null`. If the method changes back to POST, the section reappears with the previously entered content restored (not cleared).
 10. The editor has a minimum height of 8 lines and a maximum height of 24 lines. Below 8 lines it does not collapse; above 24 lines a vertical scrollbar appears inside the editor rather than the page scrolling.
+11. Template variable name collisions with path/query params display an amber warning but do NOT block the Continue button. The warning is informational — the user may intentionally want the same parameter name to serve dual purposes. The Continue button tooltip shows "1 parameter name collision — review before deploying" when a collision exists.
 
 ### Technical Notes
 
 - Line numbers for the textarea: absolute position a `<div>` to the left of the `<textarea>`. Compute line count from `value.split('\n').length`. Re-render line numbers on every state change. This is not pixel-perfect for wrapped lines but is acceptable for MVP given a fixed-width monospace font and `white-space: pre` / `overflow-x: auto` on the textarea.
 - Template variable extraction runs as a derived computation from the raw body string. Do not store the extracted variables in Zustand — derive them with `useMemo` from `builderStore.requestBody`.
 - The complete tool input schema (path params + query params + body template vars) is assembled in a selector `useToolInputSchema()` that reads from `builderStore` and returns a `ToolParameter[]` array. This selector is the single source of truth for the MCP tool's `inputSchema` used in the deploy review step (EPIC-04).
+- JSON validation and line-number extraction use the shared `parseJsonWithLineNumbers()` utility from `src/lib/jsonValidator.ts` (same as S-046). Do not reimplement.
+- The textarea uses an uncontrolled pattern (same as S-046) for consistency and performance. Line numbers are re-rendered via a `requestAnimationFrame` callback tied to the textarea's `scroll` and `input` events.

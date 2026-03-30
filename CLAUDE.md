@@ -17,12 +17,12 @@ Three main services:
 - **Platform API** — Rust/axum control plane. CRUD for servers/credentials, Clerk auth, audit logging.
 - **Credential Injector Sidecar** — Separate process that decrypts and injects credentials via Unix domain socket. Gateway never holds raw credentials.
 
-Frontend: React 19 + TypeScript + Vite + Zustand.
+Frontend: React 19 + TypeScript + Vite + Zustand + Tanstack Query + React Router. Design system: `docs/ui/SYSTEM_DESIGN.md` (v2.1).
 
 ## Planned Tech Stack
 
 - **Backend:** Rust, axum, tokio, sqlx, serde, jsonpath-rust, aes-gcm, reqwest, tower
-- **Frontend:** React 19, TypeScript, Vite, Zustand, @dnd-kit, @tanstack/virtual, jsonpath-plus, fast-xml-parser
+- **Frontend:** React 19, TypeScript, Vite, Zustand (+ immer middleware), Tanstack Query, React Router v6+, Vitest, React Testing Library, TailwindCSS
 - **Database:** PostgreSQL (JSONB configs, pgcrypto, LISTEN/NOTIFY)
 - **Auth:** Clerk (React + Rust SDKs)
 - **Monorepo:** Cargo workspaces (Rust) + pnpm workspaces (frontend)
