@@ -61,6 +61,60 @@ RULE 004: NO DROP SHADOWS
 | `error` | #ba1a1a | Error state | Validation errors |
 | `error-container` | #ffdad6 | Error background | Error message backgrounds |
 
+### Tailwind numeric scale mapping (brand-*)
+
+Stories reference Tailwind-style numeric scales (`brand-100`, `brand-500`, etc.). These map to the semantic tokens above as follows:
+
+| Tailwind class | Maps to token | Hex (light) | Hex (dark) | Usage in stories |
+|---------------|---------------|-------------|------------|------------------|
+| `brand-50` | error-container | #ffdad6 | #93000a | Lightest brand tint |
+| `brand-100` | primary (15% opacity on surface) | rgba(168, 55, 44, 0.15) | rgba(255, 180, 168, 0.15) | Selected field bg (S-047) |
+| `brand-200` | primary-container (30% opacity) | rgba(237, 106, 90, 0.30) | rgba(142, 29, 18, 0.30) | Subtle highlights |
+| `brand-300` | primary-container | #ed6a5a | #8e1d12 | Hover ring (S-047) |
+| `brand-400` | primary (light variant) | #c94a3f | #d4887f | Intermediate |
+| `brand-500` | primary | #a8372c | #ffb4a8 | Primary ring, focus (S-042, S-047, S-048) |
+| `brand-600` | primary (dark variant) | #8e1d12 | #ffcfc6 | Active states |
+| `brand-700` | inverse-surface | #2d322b | #e0e4da | Dark backgrounds |
+| `brand-800` | on-surface | #181d16 | #e0e4da | Darkest brand |
+| `brand-900` | surface-container-lowest (dark) | #0d110e | #0d110e | Selected field bg dark (S-047) |
+
+Configure in `tailwind.config.ts`:
+```ts
+// tailwind.config.ts
+export default {
+  theme: {
+    extend: {
+      colors: {
+        brand: {
+          50: 'var(--color-brand-50)',
+          100: 'var(--color-brand-100)',
+          200: 'var(--color-brand-200)',
+          300: 'var(--color-brand-300)',
+          400: 'var(--color-brand-400)',
+          500: 'var(--color-brand-500)',
+          600: 'var(--color-brand-600)',
+          700: 'var(--color-brand-700)',
+          800: 'var(--color-brand-800)',
+          900: 'var(--color-brand-900)',
+        },
+        // Map semantic tokens directly
+        surface: {
+          DEFAULT: 'var(--color-surface)',
+          'container-lowest': 'var(--color-surface-container-lowest)',
+          'container-low': 'var(--color-surface-container-low)',
+          'container': 'var(--color-surface-container)',
+          'container-high': 'var(--color-surface-container-high)',
+          'container-highest': 'var(--color-surface-container-highest)',
+          variant: 'var(--color-surface-variant)',
+        },
+      },
+    },
+  },
+}
+```
+
+CSS custom properties are set on `:root` (light) and `.dark` (dark mode) in `src/styles/tokens.css`. The Tailwind config references these variables so all utility classes automatically adapt to the active theme.
+
 ### Surface hierarchy (nesting order)
 
 ```
@@ -178,7 +232,7 @@ IF action type is:
   │   └─ USE: Gradient primary→primary-container, on-primary text, radius-md
   │
   ├─ SECONDARY (cancel, back, alternative):
-  │   └─ USE: Ghost style (transparent bg, outline text, surface-variant hover)
+  │   └─ USE: Ghost style (transparent bg, ghost border, on-surface-variant text, surface-variant hover)
   │
   ├─ TERTIARY (learn more, details, minor actions):
   │   └─ USE: Text only, no container, underline on hover
@@ -276,8 +330,8 @@ IF element is section header:
 ```css
 .btn-secondary {
   background: transparent;
-  color: #73786e; /* outline */
-  border: none;
+  color: #43483f; /* on-surface-variant — darker for visibility */
+  border: 1px solid rgba(195, 200, 187, 0.4); /* outline-variant at 40% — visible but subtle */
   border-radius: 0.5rem;
   padding: 0.75rem 1.5rem;
   font-family: 'Inter', sans-serif;
@@ -461,7 +515,7 @@ IF element is section header:
 | Variant | Background | Text | Border | Radius | Padding |
 |---------|------------|------|--------|--------|---------|
 | Primary | gradient(135deg, primary → primary-container) | on-primary | none | radius-md | 0.75rem 1.5rem |
-| Secondary | transparent → surface-variant (hover) | outline | none | radius-md | 0.75rem 1.5rem |
+| Secondary | transparent → surface-variant (hover) | on-surface-variant | ghost border (outline-variant 40%) | radius-md | 0.75rem 1.5rem |
 | Tertiary | none | outline | none (underline hover) | 0 | 0.5rem 0 |
 | Destructive | transparent → error-container (hover) | error | none | radius-md | 0.75rem 1.5rem |
 
@@ -492,6 +546,21 @@ IF element is section header:
 | Warning | tertiary-container | tertiary | ⚠ tertiary |
 | Error | error-container (15%) | error | ✕ error |
 | Info | secondary-container (10%) | secondary | ℹ secondary |
+
+### Toast notifications
+
+| Property | Value |
+|----------|-------|
+| Position | Bottom-right, z-toast (600) |
+| Background | surface-container-lowest |
+| Shadow | elevation-2 |
+| Border | none (tonal depth) |
+| Duration | 5 seconds (auto-dismiss), indefinite for errors |
+| Max visible | 3 stacked |
+| Animation | Slide up + fade in (duration-normal, easing-decelerate) |
+| Variants | Success (secondary icon), Error (error icon, no auto-dismiss), Info (secondary icon) |
+
+Toast is a global concern. Implement as a React context + portal in S-040 (app shell). Use `aria-live="polite"` for success/info, `aria-live="assertive"` for errors.
 
 ---
 
@@ -533,24 +602,105 @@ IF element is section header:
 }
 ```
 
+### Live regions for dynamic content
+
+```css
+/* Inline validation errors must be announced to screen readers */
+.validation-error {
+  role: alert; /* or aria-live="assertive" */
+}
+
+/* Character counters and status updates */
+.live-counter {
+  aria-live: polite;
+}
+```
+
+### Keyboard interaction patterns
+
+| Component | Keyboard behavior |
+|-----------|------------------|
+| Segmented control | `role="radiogroup"` with `role="radio"` children. Arrow keys move between segments. Single tab stop. |
+| Drag-and-drop reorder | Drag handle is focusable. Arrow Up/Down moves item. Enter/Space activates drag mode. Escape cancels. |
+| Collapsible section (`<details>`) | Native keyboard support via `<summary>` (Enter/Space toggles). |
+| Modal dialog (`<dialog>`) | Focus trapped inside. Escape closes. Focus returns to trigger element on close. |
+| Password toggle | Button (not link). Enter/Space toggles. Does not submit parent form (`type="button"`). |
+| Theme toggle | Button with `aria-pressed="true|false"`. |
+
+### Focus management rules
+
+| Event | Focus target |
+|-------|-------------|
+| Builder step transition (Continue) | First interactive element in new step |
+| Successful test call | Document Renderer heading or first value |
+| Modal dialog close | Element that triggered the dialog |
+| Field removed from Selected Fields | Next field in list, or empty state message |
+| Error state appears | Error message container |
+
 ---
 
 ## DARK MODE TOKENS
 
-If implementing dark mode, map tokens as follows:
+Dark mode is a P0 feature. ALL tokens must have dark equivalents. The `class` strategy is used — `<html class="dark">` toggles all tokens.
 
-| Light token | Dark value |
-|-------------|------------|
-| surface | #121714 |
-| surface-container-low | #1b1f1a |
-| surface-container-lowest | #0d110e |
-| surface-container-high | #252a24 |
-| on-surface | #e0e4da |
-| on-surface-variant | #c3c8bb |
-| primary | #ffb4a8 |
-| primary-container | #8e1d12 |
-| secondary | #a6eff4 |
-| secondary-container | #004f54 |
+### Complete dark mode token mapping
+
+| Light token | Light value | Dark value | Notes |
+|-------------|------------|------------|-------|
+| `surface` | #f6fbf0 | #121714 | Page canvas |
+| `surface-container-lowest` | #ffffff | #0d110e | Cards, modals |
+| `surface-container-low` | #f0f5ea | #1b1f1a | Section groups, input bg |
+| `surface-container` | #eaefe4 | #202520 | Mid-level sections |
+| `surface-container-high` | #e5eadf | #2a2f29 | Sidebars, utility panels |
+| `surface-container-highest` | #dfe4d9 | #353a33 | Hover states |
+| `surface-variant` | #dfe4d9 | #43483f | Disabled backgrounds |
+| `inverse-surface` | #2d322b | #e0e4da | Code blocks flip in dark |
+| `on-surface` | #181d16 | #e0e4da | Primary text |
+| `on-surface-variant` | #43483f | #c3c8bb | Secondary text, labels |
+| `inverse-on-surface` | #edf2e7 | #2d322b | Text on inverse surfaces |
+| `outline` | #73786e | #8d9286 | Ghost button text, borders |
+| `outline-variant` | #c3c8bb | #43483f | Ghost borders (15% opacity) |
+| `on-primary` | #ffffff | #ffffff | Text on primary buttons |
+| `primary` | #a8372c | #ffb4a8 | Brand / high-intent |
+| `primary-container` | #ed6a5a | #8e1d12 | Gradient endpoints |
+| `secondary` | #15686d | #a6eff4 | Links, data viz, status |
+| `secondary-container` | #a6eff4 | #004f54 | Highlights, selected |
+| `tertiary` | #616036 | #c9c88c | Soft alerts, code strings |
+| `tertiary-container` | #fcf7c1 | #494830 | Soft highlight backgrounds |
+| `error` | #ba1a1a | #ffb4ab | Validation errors |
+| `error-container` | #ffdad6 | #93000a | Error message backgrounds |
+
+### Dark mode gradient adjustment
+
+The primary button gradient in dark mode uses the dark token values. Because `primary` (#ffb4a8) is lighter than `primary-container` (#8e1d12) in dark mode (reversed from light mode), the gradient direction must flip:
+
+| Mode | Gradient |
+|------|----------|
+| Light | `linear-gradient(135deg, #a8372c 0%, #ed6a5a 100%)` |
+| Dark | `linear-gradient(135deg, #8e1d12 0%, #ffb4a8 100%)` — or use a solid `primary-container` background with `primary` text for better contrast |
+
+**Recommendation:** In dark mode, use a solid `primary-container` (#8e1d12) background with `on-primary` (#ffffff) text instead of the gradient. This provides better contrast and avoids the light-to-dark gradient issue.
+
+### Dark mode code blocks
+
+In dark mode, code blocks flip: use `inverse-surface` dark value (#e0e4da) as background would be too light. Instead, keep code blocks on `surface-container-lowest` (#0d110e) in dark mode with `inverse-on-surface` dark value text. Syntax highlighting colors remain unchanged.
+
+```css
+/* Dark mode code block override */
+.dark .code-block {
+  background: #0d110e; /* surface-container-lowest (dark) */
+  color: #e0e4da; /* on-surface (dark) */
+}
+```
+
+### Skeleton loading colors
+
+| Mode | Skeleton base | Skeleton pulse |
+|------|--------------|----------------|
+| Light | `surface-container-high` (#e5eadf) | `surface-container-low` (#f0f5ea) |
+| Dark | `surface-container-high` (dark: #2a2f29) | `surface-container` (dark: #202520) |
+
+Skeleton elements use `animate-pulse` between the base and pulse colors. The pulse creates a subtle shimmer effect that communicates loading without being distracting.
 
 ---
 
@@ -627,5 +777,6 @@ Run through this checklist before finalizing any UI output:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1 | 2026-03-30 | Complete dark mode tokens (22 values), brand-* numeric scale, secondary button visibility fix, skeleton colors, code block dark mode, accessibility keyboard patterns, focus management rules, toast spec |
 | 2.0 | 2025 | Agent-optimized structure, decision trees, code templates, validation checklist |
 | 1.0 | — | Original editorial specification |

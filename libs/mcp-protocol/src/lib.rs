@@ -1,4 +1,10 @@
 //! MCP (Model Context Protocol) types and serialization.
+//!
+//! For application-level error → JSON-RPC error code mapping, see
+//! `mcp_common::McpError` and its `From<AppError>` implementation.
+//! `McpError` lives in `mcp-common` rather than here because the `From<AppError>`
+//! impl requires `AppError` to be a local type (Rust orphan rule), and adding a
+//! `mcp-common` dependency here would create a circular crate dependency.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +49,26 @@ pub struct JsonRpcError {
     /// Additional error data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+}
+
+/// Standard JSON-RPC 2.0 error codes used in MCP responses.
+///
+/// The `From<AppError>` conversion that maps application errors to these codes
+/// lives in `mcp_common::McpError` (not here) to avoid a circular crate
+/// dependency. See that type for the full mapping.
+pub mod error_codes {
+    /// Invalid JSON was received.
+    pub const PARSE_ERROR: i32 = -32700;
+    /// The JSON payload is not a valid request.
+    pub const INVALID_REQUEST: i32 = -32600;
+    /// The requested method does not exist.
+    pub const METHOD_NOT_FOUND: i32 = -32601;
+    /// Invalid method parameters.
+    pub const INVALID_PARAMS: i32 = -32602;
+    /// Internal JSON-RPC error.
+    pub const INTERNAL_ERROR: i32 = -32603;
+    /// Base code for implementation-defined server errors (-32000 to -32099).
+    pub const SERVER_ERROR_BASE: i32 = -32000;
 }
 
 #[cfg(test)]

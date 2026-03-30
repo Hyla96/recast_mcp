@@ -254,7 +254,7 @@ async fn credential_write_stores_ciphertext_not_plaintext() {
     .expect("insert server");
 
     // Encrypt a plaintext credential using mcp-crypto.
-    let key = [0x42u8; 32];
+    let key = mcp_crypto::CryptoKey::from_bytes([0x42u8; 32]);
     let plaintext = b"Bearer super-secret-token-12345";
     let iv_and_ciphertext = mcp_crypto::encrypt(&key, plaintext).expect("encrypt");
 
@@ -298,7 +298,7 @@ async fn credential_write_stores_ciphertext_not_plaintext() {
     full.extend_from_slice(iv);
     full.extend_from_slice(&stored_payload);
     let decrypted = mcp_crypto::decrypt(&key, &full).expect("decrypt");
-    assert_eq!(decrypted, plaintext, "decrypted value must match original plaintext");
+    assert_eq!(decrypted.as_slice(), plaintext.as_ref(), "decrypted value must match original plaintext");
 }
 
 // ─── FK constraint: credential with unknown server_id rejected ────────────────

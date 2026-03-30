@@ -1,70 +1,31 @@
 //! Platform API service.
+//!
+//! Entry point for the Recast MCP Platform API. Owns the application startup
+//! lifecycle: telemetry init, config validation, database pool creation, router
+//! assembly, and graceful shutdown sequencing.
 
-mod config;
+// Module declarations live in lib.rs so integration tests can import them.
+// The binary imports everything from the lib crate (same package).
+use mcp_api::app_state::AppState;
+use mcp_api::auth::JwksCache;
+use mcp_api::config::ApiConfig;
+use mcp_api::credentials::CredentialService;
+use mcp_api::router::build_router;
+use mcp_api::servers::ServerService;
+use mcp_api::shutdown::shutdown_signal;
 
-use axum::{
-    http::header,
-    response::IntoResponse,
-    routing::get,
-    Extension, Router,
-};
-use config::Config;
-use mcp_common::{
-    health::{live_handler, pg_pool_checker, ready_handler, HealthState},
-    init_telemetry, FromEnv,
-};
-use metrics_exporter_prometheus::PrometheusHandle;
-use std::{net::SocketAddr, time::Instant};
-use tower_http::trace::TraceLayer;
+use mcp_common::{init_telemetry, AuditLogger, FromEnv};
+use mcp_crypto::CryptoKey;
+use sqlx::postgres::PgPoolOptions;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-/// Axum middleware function that records `http_requests_total` and
-/// `http_request_duration_seconds` Prometheus metrics for every request.
-async fn track_metrics(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let start = Instant::now();
-
-    let response = next.run(req).await;
-
-    let duration = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-
-    metrics::counter!(
-        "http_requests_total",
-        "method" => method.clone(),
-        "status" => status,
-        "path" => path.clone()
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "http_request_duration_seconds",
-        "method" => method,
-        "path" => path
-    )
-    .record(duration);
-
-    response
-}
-
-/// Handler for `GET /metrics` — returns Prometheus-format metrics.
-async fn metrics_handler(
-    Extension(handle): Extension<PrometheusHandle>,
-) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        handle.render(),
-    )
-}
+// ── main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
-    // Validate configuration before initializing any subsystems.
+    // Validate configuration before initialising any subsystems.
     // Fail immediately with all missing/malformed variables listed.
-    let cfg = match Config::from_env() {
+    let cfg = match ApiConfig::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("platform-api: {e}");
@@ -90,9 +51,17 @@ async fn main() {
         }
     };
 
-    // Create a lazy pool — connects on first use, so startup is non-blocking.
-    // /health/ready will return 503 until the DB is reachable.
-    let db_pool = match sqlx::PgPool::connect_lazy(&cfg.database_url) {
+    // Create a pool with explicit sizing and timeout settings.
+    // `connect_lazy` defers the first physical connection until a query is issued,
+    // so startup is non-blocking. /health/ready returns 503 until the DB is reachable.
+    let pool = match PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(2)
+        .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
+        .connect_lazy(&cfg.database_url)
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("failed to create database pool: {e}");
@@ -100,92 +69,76 @@ async fn main() {
         }
     };
 
-    tracing::info!(port = cfg.port, database_url = cfg.database_url, "starting platform api");
+    let audit_logger = AuditLogger::new(pool.clone());
+    let jwks_cache = JwksCache::new(&cfg.clerk_jwks_url);
 
-    let health_state = HealthState {
-        service: "mcp-api",
-        version: env!("CARGO_PKG_VERSION"),
-        db_checker: pg_pool_checker(db_pool),
-    };
-
-    // Health routes are intentionally outside TraceLayer and metrics middleware
-    // so they do not emit OTEL spans and do not skew request metrics.
-    let health_router = Router::new()
-        .route("/health/live", get(live_handler))
-        .route("/health/ready", get(ready_handler))
-        .layer(Extension(health_state));
-
-    let api_router = Router::new()
-        .route("/metrics", get(metrics_handler))
-        .layer(Extension(prom_handle))
-        .layer(TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(track_metrics));
-
-    let app = Router::new().merge(health_router).merge(api_router);
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
-    tracing::info!("listening on {}", addr);
-
-    match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("server error: {}", e);
-                std::process::exit(1);
-            }
-        }
+    let crypto_key = match CryptoKey::from_hex(&cfg.encryption_key) {
+        Ok(k) => Arc::new(k),
         Err(e) => {
-            tracing::error!("failed to bind to {}: {}", addr, e);
+            tracing::error!("invalid MCP_ENCRYPTION_KEY: {e}");
             std::process::exit(1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-        routing::get,
-        Extension, Router,
     };
-    use mcp_common::health::{live_handler, ready_handler, DbCheckerFn, HealthState};
-    use std::sync::Arc;
-    use tower::ServiceExt;
+    let credential_service =
+        CredentialService::new(pool.clone(), crypto_key, audit_logger.clone());
 
-    fn make_test_router(db_checker: DbCheckerFn) -> Router {
-        let state = HealthState {
-            service: "mcp-api",
-            version: "0.0.0",
-            db_checker,
-        };
-        Router::new()
-            .route("/health/live", get(live_handler))
-            .route("/health/ready", get(ready_handler))
-            .layer(Extension(state))
+    tracing::info!(
+        port = cfg.port,
+        cors_origins = ?cfg.cors_origins,
+        "starting platform api"
+    );
+
+    let port = cfg.port;
+    let server_service = ServerService::new(
+        pool.clone(),
+        audit_logger.clone(),
+        cfg.gateway_base_url.clone(),
+    );
+
+    let state = AppState {
+        pool: pool.clone(),
+        config: Arc::new(cfg),
+        audit_logger: audit_logger.clone(),
+        jwks_cache,
+        credential_service,
+        server_service,
+    };
+
+    let app = build_router(state, prom_handle);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("failed to bind to {addr}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    tracing::info!("listening on {}", addr);
+
+    // Run the server; stop accepting new connections on SIGTERM/SIGINT.
+    // In-flight requests are given up to 30 s to complete before we force shutdown.
+    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+
+    match tokio::time::timeout(Duration::from_secs(35), serve).await {
+        Ok(Ok(())) => tracing::info!("server drained gracefully"),
+        Ok(Err(e)) => tracing::error!("server error: {e}"),
+        Err(_) => tracing::warn!("graceful shutdown drain timeout after 30 s — forcing close"),
     }
 
-    #[tokio::test]
-    async fn health_ready_returns_200_when_db_healthy() {
-        let checker: DbCheckerFn = Arc::new(|| Box::pin(async { Ok(()) }));
-        let app = make_test_router(checker);
-        let req = Request::builder()
-            .uri("/health/ready")
-            .body(Body::empty())
-            .unwrap();
-        let res = app.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-    }
+    // ── Post-shutdown cleanup sequence ────────────────────────────────────────
 
-    #[tokio::test]
-    async fn health_ready_returns_503_when_db_unhealthy() {
-        let checker: DbCheckerFn =
-            Arc::new(|| Box::pin(async { Err("connection refused".to_string()) }));
-        let app = make_test_router(checker);
-        let req = Request::builder()
-            .uri("/health/ready")
-            .body(Body::empty())
-            .unwrap();
-        let res = app.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
+    // 1. Flush the audit log — give it 5 s before abandoning remaining events.
+    tracing::info!("flushing audit log");
+    tokio::time::timeout(Duration::from_secs(5), audit_logger.shutdown())
+        .await
+        .ok();
+
+    // 2. Close the database pool — waits for borrowed connections to be returned.
+    tracing::info!("closing database pool");
+    pool.close().await;
+
+    // 3. TelemetryGuard drops here, which flushes the OTLP trace exporter.
+    tracing::info!("telemetry flushed — goodbye");
 }

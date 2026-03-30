@@ -20,9 +20,15 @@ chrono = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 tower-http = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+lru = "0.12"
+base64 = "0.22"
+url = "2"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
+mcp-common = { path = "../../libs/common", features = ["testing"] }
+tokio = { version = "1", features = ["full"] }
 
 [lints]
 workspace = true

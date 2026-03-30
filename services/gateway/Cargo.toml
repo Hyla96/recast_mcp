@@ -19,7 +19,21 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
+futures-util = "0.3"
+deadpool-redis = "0.15"
+moka = { version = "0.12", features = ["sync"] }
+dashmap = "6"
+percent-encoding = "2"
+thiserror = "1.0"
+argon2 = { version = "0.5", features = ["std", "password-hash"] }
+base64ct = { version = "1", features = ["alloc"] }
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+jsonpath-rust = "0.7"
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+url = "2"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
@@ -29,7 +43,29 @@ mcp-protocol = { path = "../../libs/mcp-protocol" }
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 hex = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+scopeguard = "1"
+
+[[bench]]
+name = "jsonrpc_parse"
+harness = false
+
+[[bench]]
+name = "cache_get"
+harness = false
+
+[[bench]]
+name = "argon2_verify"
+harness = false
+
+[[bench]]
+name = "transform_pipeline"
+harness = false
+
+[[bench]]
+name = "router_dispatch"
+harness = false
 
 [lints]
 workspace = true

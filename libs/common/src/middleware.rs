@@ -1,6 +1,7 @@
 //! Shared axum middleware for all services.
 
-use axum::{extract::Request, middleware::Next, response::Response};
+use axum::{extract::Request, http::header, middleware::Next, response::{IntoResponse, Response}};
+use metrics_exporter_prometheus::PrometheusHandle;
 use ulid::Ulid;
 
 /// A per-request identifier stored as a ULID string.
@@ -56,4 +57,71 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     }
 
     response
+}
+
+// ── Prometheus metrics middleware ─────────────────────────────────────────────
+
+/// Axum `from_fn` middleware that records `http_requests_total` and
+/// `http_request_duration_seconds` Prometheus metrics for every request.
+///
+/// Uses [`axum::extract::MatchedPath`] for the `path` label to avoid
+/// unbounded label cardinality. Requests that hit no registered route (404s)
+/// use the static label value `"unmatched"`.
+pub async fn track_metrics(req: Request, next: Next) -> Response {
+    let method = req.method().to_string();
+    // Use the route template (e.g. `/v1/servers/:id`) rather than the raw URI
+    // so that path parameters (UUIDs, slugs, etc.) don't create unbounded
+    // Prometheus time series.
+    let path = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|mp| mp.as_str().to_owned())
+        .unwrap_or_else(|| "unmatched".to_owned());
+    let start = std::time::Instant::now();
+
+    let response = next.run(req).await;
+
+    let duration = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    metrics::counter!(
+        "http_requests_total",
+        "method" => method.clone(),
+        "status" => status,
+        "path" => path.clone()
+    )
+    .increment(1);
+
+    metrics::histogram!(
+        "http_request_duration_seconds",
+        "method" => method,
+        "path" => path
+    )
+    .record(duration);
+
+    response
+}
+
+// ── Prometheus scrape endpoint ────────────────────────────────────────────────
+
+/// Handler for `GET /metrics` — returns Prometheus-format metrics.
+///
+/// Mount this route **outside** the health router and add
+/// `Extension(prom_handle)` to the router's layer stack.
+pub async fn metrics_handler(
+    axum::Extension(handle): axum::Extension<PrometheusHandle>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        handle.render(),
+    )
+}
+
+// ── 404 fallback ──────────────────────────────────────────────────────────────
+
+/// Fallback handler — returns `404 Not Found` with the standard JSON error body
+/// for any route that does not match a registered path.
+pub async fn fallback_handler() -> impl axum::response::IntoResponse {
+    crate::AppError::NotFound("the requested resource does not exist".to_string())
+        .into_response()
 }
