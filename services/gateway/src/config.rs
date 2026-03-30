@@ -58,6 +58,13 @@ pub struct Config {
     /// Maximum total simultaneous in-flight connections across all servers.
     /// Set via `GATEWAY_MAX_CONNECTIONS` (default: `10000`).
     pub gateway_max_connections: usize,
+
+    /// Static bearer token required to access `GET /metrics`.
+    /// Set via `METRICS_TOKEN` (optional).
+    ///
+    /// When `None`, the `/metrics` endpoint is accessible without
+    /// authentication. Set this in production to prevent public metric scraping.
+    pub metrics_token: Option<String>,
 }
 
 impl FromEnv for Config {
@@ -92,6 +99,8 @@ impl FromEnv for Config {
         let gateway_max_connections: usize =
             env_optional_parsed(&mut errors, "GATEWAY_MAX_CONNECTIONS", 10_000);
 
+        let metrics_token = std::env::var("METRICS_TOKEN").ok().filter(|s| !s.is_empty());
+
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -109,6 +118,7 @@ impl FromEnv for Config {
                 feature_rate_limit_enabled,
                 log_level,
                 gateway_max_connections,
+                metrics_token,
             }),
             // Logically unreachable: env_required pushes an error and returns None
             // whenever the variable is absent, so errors would be non-empty above.

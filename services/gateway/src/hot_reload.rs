@@ -27,7 +27,10 @@ use crate::cache::{row_to_server_config, ConfigCache, ServerConfig};
 use dashmap::DashMap;
 use serde::Deserialize;
 use sqlx::postgres::PgListener;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -106,6 +109,9 @@ pub struct ConfigSyncTask {
     query_pool: sqlx::PgPool,
     /// The cache to keep in sync.
     cache: Arc<ConfigCache>,
+    /// Set to `true` once the LISTEN subscription is confirmed; reset to
+    /// `false` on connection loss. Shared with the `/healthz/ready` probe.
+    listen_connected: Arc<AtomicBool>,
 }
 
 impl ConfigSyncTask {
@@ -119,7 +125,16 @@ impl ConfigSyncTask {
             db_url,
             query_pool,
             cache,
+            listen_connected: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns the shared flag that is `true` while the LISTEN connection is up.
+    ///
+    /// Call this **before** [`start`] (which consumes `self`) to obtain a
+    /// reference usable from other components (e.g. the `/healthz/ready` probe).
+    pub fn listen_connected_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.listen_connected)
     }
 
     /// Start the supervised listener. Returns immediately; the task runs in the
@@ -130,15 +145,17 @@ impl ConfigSyncTask {
         let db_url = Arc::new(self.db_url);
         let query_pool = self.query_pool;
         let cache = self.cache;
+        let listen_connected = self.listen_connected;
 
         tokio::spawn(async move {
             loop {
                 let db_url_c = Arc::clone(&db_url);
                 let pool_c = query_pool.clone();
                 let cache_c = Arc::clone(&cache);
+                let flag_c = Arc::clone(&listen_connected);
 
                 let handle = tokio::spawn(async move {
-                    run_sync_loop((*db_url_c).clone(), pool_c, cache_c).await;
+                    run_sync_loop((*db_url_c).clone(), pool_c, cache_c, flag_c).await;
                 });
 
                 match handle.await {
@@ -164,13 +181,21 @@ impl ConfigSyncTask {
 
 /// Outer loop: repeatedly connects and listens, reconnecting with exponential
 /// backoff on failure. Runs indefinitely until a clean exit (graceful shutdown).
-async fn run_sync_loop(db_url: String, query_pool: sqlx::PgPool, cache: Arc<ConfigCache>) {
+async fn run_sync_loop(
+    db_url: String,
+    query_pool: sqlx::PgPool,
+    cache: Arc<ConfigCache>,
+    listen_connected: Arc<AtomicBool>,
+) {
     let versions: VersionMap = Arc::new(DashMap::new());
     let mut backoff_secs: u64 = BACKOFF_INITIAL_SECS;
     let mut disconnect_time: Option<chrono::DateTime<chrono::Utc>> = None;
 
     loop {
         if let Some(lost_at) = disconnect_time {
+            // Mark the LISTEN connection as down while we wait to reconnect.
+            listen_connected.store(false, Ordering::Release);
+
             tracing::warn!(
                 backoff_secs,
                 "config sync LISTEN connection lost; reconnecting"
@@ -198,7 +223,7 @@ async fn run_sync_loop(db_url: String, query_pool: sqlx::PgPool, cache: Arc<Conf
         // the next iteration's replay, we query rows updated since this point.
         disconnect_time = Some(chrono::Utc::now());
 
-        match run_listener_once(&db_url, &cache, &versions, &query_pool).await {
+        match run_listener_once(&db_url, &cache, &versions, &query_pool, &listen_connected).await {
             Ok(()) => {
                 tracing::info!("config sync listener exited cleanly");
                 return;
@@ -215,15 +240,23 @@ async fn run_sync_loop(db_url: String, query_pool: sqlx::PgPool, cache: Arc<Conf
 
 /// Connect once to PostgreSQL, subscribe to the channel, and process
 /// notifications until an error occurs or a graceful exit is signalled.
+///
+/// Sets `listen_connected` to `true` once the LISTEN subscription is confirmed
+/// and the loop is processing notifications. The caller resets it to `false`
+/// on connection loss.
 async fn run_listener_once(
     db_url: &str,
     cache: &Arc<ConfigCache>,
     versions: &VersionMap,
     query_pool: &sqlx::PgPool,
+    listen_connected: &Arc<AtomicBool>,
 ) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect(db_url).await?;
     listener.listen(PG_CHANNEL).await?;
     tracing::info!("config sync: subscribed to PostgreSQL channel '{PG_CHANNEL}'");
+
+    // Subscription confirmed — mark the connection as live for the readiness probe.
+    listen_connected.store(true, Ordering::Release);
 
     loop {
         let batch = collect_batch(&mut listener).await?;

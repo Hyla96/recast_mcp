@@ -209,6 +209,20 @@ impl SidecarPool {
         })
     }
 
+    /// Check whether the sidecar socket is reachable.
+    ///
+    /// Attempts a new TCP/Unix connection to the socket with a 200 ms timeout.
+    /// Returns `true` if the connection succeeds (even if immediately closed).
+    /// This is used by the `/healthz/ready` probe.
+    pub async fn is_healthy(&self) -> bool {
+        let path = self.socket_path.clone();
+        let connect = tokio::net::UnixStream::connect(&path);
+        matches!(
+            tokio::time::timeout(Duration::from_millis(200), connect).await,
+            Ok(Ok(_))
+        )
+    }
+
     /// Acquire a connection. Reuses an idle one or opens a new socket.
     ///
     /// Blocks when `POOL_MAX` connections are already in use.

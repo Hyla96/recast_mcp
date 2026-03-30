@@ -117,6 +117,10 @@ pub struct ConfigCache {
     eviction_count: Arc<AtomicU64>,
     /// Database pool used for cache-miss queries and `load_all`.
     db_pool: PgPool,
+    /// Set to `true` after [`load_all`] completes successfully.
+    ///
+    /// Used by the `/healthz/ready` probe to indicate the cache is warm.
+    cache_loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConfigCache {
@@ -162,7 +166,33 @@ impl ConfigCache {
             miss_count: Arc::new(AtomicU64::new(0)),
             eviction_count,
             db_pool,
+            cache_loaded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Returns `true` if [`load_all`] has completed successfully at least once.
+    ///
+    /// Used by the `/healthz/ready` endpoint to confirm the cache is warm.
+    pub fn is_loaded(&self) -> bool {
+        self.cache_loaded.load(Ordering::Acquire)
+    }
+
+    /// Current number of entries in the cache.
+    ///
+    /// May briefly lag insertions/removals — moka processes pending tasks
+    /// asynchronously. For tests, call `run_pending_tasks()` first if exact
+    /// counts are required.
+    pub fn entry_count(&self) -> u64 {
+        self.inner.entry_count()
+    }
+
+    /// Test-only helper: mark the cache as loaded without performing a DB query.
+    ///
+    /// Used in unit tests that need the readiness probe to see the cache as warm.
+    #[cfg(test)]
+    pub fn mark_loaded_for_testing(&self) {
+        self.cache_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Look up a server by ID in the in-memory cache only.
@@ -302,6 +332,8 @@ impl ConfigCache {
 
         tracing::info!(count, "gateway config cache loaded from database");
         metrics::gauge!("gateway_cache_entries").set(self.inner.entry_count() as f64);
+        self.cache_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(count)
     }
 }

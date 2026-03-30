@@ -5,6 +5,7 @@ pub mod cache;
 pub mod circuit_breaker;
 mod config;
 pub mod connections;
+pub mod health;
 pub mod hot_reload;
 pub mod logging;
 pub mod protocol;
@@ -24,11 +25,14 @@ use cache::ConfigCache;
 use circuit_breaker::CircuitBreakerRegistry;
 use config::Config;
 use connections::ConnectionTracker;
+use health::{
+    gateway_live_handler, gateway_metrics_handler, gateway_ready_handler, GatewayHealthState,
+};
 use hot_reload::ConfigSyncTask;
 use logging::{LogLevel, RequestLogger};
 use mcp_common::{
     health::{live_handler, pg_pool_checker, ready_handler, HealthState},
-    init_telemetry, metrics_handler, track_metrics, FromEnv,
+    init_telemetry, FromEnv,
 };
 use router::{Router as McpRouter, UpstreamPipeline};
 use sidecar::{SidecarPool, UpstreamExecutor};
@@ -41,7 +45,6 @@ use std::{
     },
     time::Instant,
 };
-use tower_http::trace::TraceLayer;
 use sse::{build_sse_router, spawn_session_sweeper, SessionRegistry, SseFallbackState};
 use transport::{build_transport_router, TransportState};
 use upstream::UpstreamRequestBuilder;
@@ -116,6 +119,8 @@ async fn main() {
         db_pool.clone(),
         Arc::clone(&cache),
     );
+    // Capture the flag BEFORE start() consumes `sync_task`.
+    let listen_connected = sync_task.listen_connected_flag();
     // Keep the handle so we can abort the task during graceful shutdown.
     let sync_handle = sync_task.start();
 
@@ -127,7 +132,7 @@ async fn main() {
     let circuit_registry = CircuitBreakerRegistry::new();
     let http_client = reqwest::Client::new();
     let executor = Arc::new(UpstreamExecutor::new(
-        sidecar_pool,
+        Arc::clone(&sidecar_pool),
         http_client,
         circuit_registry,
     ));
@@ -189,22 +194,38 @@ async fn main() {
         db_checker: ready_db_checker,
     };
 
+    // Gateway-specific health state: includes instance_id, cache loaded flag,
+    // LISTEN connection flag, and sidecar pool liveness probe.
+    let gateway_health_state = GatewayHealthState {
+        instance_id: instance_id.clone(),
+        cache: Arc::clone(&cache),
+        listen_connected,
+        sidecar_pool,
+        metrics_token: cfg.metrics_token.clone(),
+    };
+
     // Health routes are intentionally outside TraceLayer and metrics middleware
     // so they do not emit OTEL spans and do not skew request metrics.
     let health_router = Router::new()
+        // Legacy DB-only probes (used by docker-compose, existing LB checks).
         .route("/health/live", get(live_handler))
         .route("/health/ready", get(ready_handler))
+        // Gateway-specific probes: include instance_id + all readiness checks.
+        .route("/healthz/live", get(gateway_live_handler))
+        .route("/healthz/ready", get(gateway_ready_handler))
+        .layer(Extension(gateway_health_state.clone()))
         .layer(Extension(health_state));
 
-    let api_router = Router::new()
-        .route("/metrics", get(metrics_handler))
-        .layer(Extension(prom_handle))
-        .layer(TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(track_metrics));
+    // Metrics endpoint: secured by METRICS_TOKEN when configured, outside
+    // TraceLayer to avoid emitting OTEL spans on every Prometheus scrape.
+    let metrics_router = Router::new()
+        .route("/metrics", get(gateway_metrics_handler))
+        .layer(Extension(gateway_health_state))
+        .layer(Extension(prom_handle));
 
     let app = Router::new()
         .merge(health_router)
-        .merge(api_router)
+        .merge(metrics_router)
         .merge(mcp_transport)
         .merge(sse_transport);
 
