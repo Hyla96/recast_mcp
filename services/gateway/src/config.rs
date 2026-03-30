@@ -54,6 +54,10 @@ pub struct Config {
     /// Accepted values (case-insensitive): `trace`, `debug`, `info`, `warn`,
     /// `warning`, `error`. Unrecognised values fall back to `info`.
     pub log_level: String,
+
+    /// Maximum total simultaneous in-flight connections across all servers.
+    /// Set via `GATEWAY_MAX_CONNECTIONS` (default: `10000`).
+    pub gateway_max_connections: usize,
 }
 
 impl FromEnv for Config {
@@ -85,6 +89,8 @@ impl FromEnv for Config {
             env_optional_parsed(&mut errors, "FEATURE_RATE_LIMIT_ENABLED", true);
 
         let log_level = env_optional("LOG_LEVEL", "info");
+        let gateway_max_connections: usize =
+            env_optional_parsed(&mut errors, "GATEWAY_MAX_CONNECTIONS", 10_000);
 
         if !errors.is_empty() {
             return Err(errors);
@@ -102,6 +108,7 @@ impl FromEnv for Config {
                 redis_url,
                 feature_rate_limit_enabled,
                 log_level,
+                gateway_max_connections,
             }),
             // Logically unreachable: env_required pushes an error and returns None
             // whenever the variable is absent, so errors would be non-empty above.

@@ -66,6 +66,9 @@ pub struct ServerConfig {
     /// First 8 characters of the raw token, safe to include in logs.
     /// `None` if no token has been configured for this server.
     pub token_prefix: Option<String>,
+    /// Maximum simultaneous in-flight connections for this server.
+    /// Defaults to 50 if not set in the database.
+    pub max_connections: u32,
     /// Row creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last-updated timestamp.
@@ -198,7 +201,7 @@ impl ConfigCache {
 
         let maybe_row = sqlx::query(
             "SELECT id, user_id, name, slug, description, config_json, \
-             status, config_version, token_hash, token_prefix, \
+             status, config_version, token_hash, token_prefix, max_connections, \
              created_at, updated_at \
              FROM mcp_servers \
              WHERE id = $1 AND status = 'active'",
@@ -283,7 +286,7 @@ impl ConfigCache {
     pub async fn load_all(&self) -> Result<usize, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, user_id, name, slug, description, config_json, \
-             status, config_version, token_hash, token_prefix, \
+             status, config_version, token_hash, token_prefix, max_connections, \
              created_at, updated_at \
              FROM mcp_servers \
              WHERE status = 'active'",
@@ -311,6 +314,8 @@ impl ConfigCache {
 /// status, config_version, token_hash, token_prefix, created_at, updated_at.
 pub(crate) fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<ServerConfig, sqlx::Error> {
     use sqlx::Row;
+    // max_connections is stored as PostgreSQL INTEGER (i32); cast to u32.
+    let max_connections: i32 = row.try_get("max_connections").unwrap_or(50);
     Ok(ServerConfig {
         id: row.try_get("id")?,
         user_id: row.try_get("user_id")?,
@@ -322,6 +327,7 @@ pub(crate) fn row_to_server_config(row: &sqlx::postgres::PgRow) -> Result<Server
         config_version: row.try_get("config_version")?,
         token_hash: row.try_get("token_hash")?,
         token_prefix: row.try_get("token_prefix")?,
+        max_connections: max_connections.max(0) as u32,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -353,6 +359,7 @@ mod tests {
             config_version: 1,
             token_hash: None,
             token_prefix: None,
+            max_connections: 50,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
@@ -415,6 +422,7 @@ mod tests {
                 config_version: 2,
                 token_hash: None,
                 token_prefix: None,
+                max_connections: 50,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             });

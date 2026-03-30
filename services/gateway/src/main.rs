@@ -4,6 +4,7 @@ mod config;
 pub mod auth;
 pub mod cache;
 pub mod circuit_breaker;
+pub mod connections;
 pub mod hot_reload;
 pub mod logging;
 pub mod protocol;
@@ -20,6 +21,7 @@ use axum::{routing::get, Extension, Router};
 use cache::ConfigCache;
 use circuit_breaker::CircuitBreakerRegistry;
 use config::Config;
+use connections::ConnectionTracker;
 use hot_reload::ConfigSyncTask;
 use logging::{LogLevel, RequestLogger};
 use mcp_common::{
@@ -122,9 +124,17 @@ async fn main() {
 
     let mcp_router = Arc::new(McpRouter::new(Arc::clone(&cache), upstream, logger));
 
+    // ── Build connection tracker ──────────────────────────────────────────────
+    let connection_tracker = ConnectionTracker::new(cfg.gateway_max_connections);
+
     // ── Build Streamable HTTP transport ───────────────────────────────────────
     let validator = Arc::new(TokenValidator::new());
-    let transport_state = TransportState::new(Arc::clone(&cache), validator, mcp_router);
+    let transport_state = TransportState::new(
+        Arc::clone(&cache),
+        validator,
+        mcp_router,
+        connection_tracker,
+    );
     let mcp_transport = build_transport_router(transport_state);
 
     let health_state = HealthState {

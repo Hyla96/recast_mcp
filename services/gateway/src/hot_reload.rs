@@ -636,6 +636,7 @@ mod tests {
             config_version: 2,
             token_hash: None,
             token_prefix: None,
+            max_connections: 50,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }));

@@ -39,6 +39,7 @@ use serde_json::json;
 
 use crate::auth::{extract_token_prefix, AuthError, TokenValidator};
 use crate::cache::ConfigCache;
+use crate::connections::{CapacityError, ConnectionGuard, ConnectionTracker};
 use crate::protocol::jsonrpc::{parse, Message, ParseResult};
 use crate::router::Router as McpRouter;
 
@@ -59,6 +60,8 @@ pub struct TransportState {
     pub validator: Arc<TokenValidator>,
     /// JSON-RPC method dispatcher.
     pub router: Arc<McpRouter>,
+    /// Per-server and global connection-limit tracker.
+    pub connection_tracker: Arc<ConnectionTracker>,
     /// Seconds to hold an SSE connection alive after the initial response event.
     ///
     /// Production default: 60. Set to 0 in tests to avoid sleeping.
@@ -71,11 +74,13 @@ impl TransportState {
         cache: Arc<ConfigCache>,
         validator: Arc<TokenValidator>,
         router: Arc<McpRouter>,
+        connection_tracker: Arc<ConnectionTracker>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cache,
             validator,
             router,
+            connection_tracker,
             sse_keepalive_secs: 60,
         })
     }
@@ -148,17 +153,57 @@ pub async fn mcp_post_handler(
         }
     };
 
-    // ── 4. Parse JSON-RPC body ────────────────────────────────────────────
+    // ── 4. Connection limit check (after auth) ────────────────────────────
+    //
+    // ConnectionGuard decrements the counters on drop (including on panic
+    // unwind), providing the same guarantee as `scopeguard::defer!`.
+    let conn_guard = match state
+        .connection_tracker
+        .try_acquire(config.id, config.max_connections)
+    {
+        Ok(g) => g,
+        Err(CapacityError::ServerLimitReached) => {
+            let mut resp = build_json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                -32005,
+                "Server at capacity",
+            );
+            resp.headers_mut().insert(
+                header::HeaderName::from_static("retry-after"),
+                HeaderValue::from_static("1"),
+            );
+            return resp;
+        }
+        Err(CapacityError::GlobalLimitReached) => {
+            let mut resp = build_json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                -32005,
+                "Gateway at capacity",
+            );
+            resp.headers_mut().insert(
+                header::HeaderName::from_static("retry-after"),
+                HeaderValue::from_static("1"),
+            );
+            return resp;
+        }
+    };
+
+    // ── 5. Parse JSON-RPC body ────────────────────────────────────────────
     let message = parse(&body);
 
-    // ── 5. SSE preference ─────────────────────────────────────────────────
+    // ── 6. SSE preference ─────────────────────────────────────────────────
     let wants_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.contains("text/event-stream"))
         .unwrap_or(false);
 
-    // ── 6. Dispatch and build response ────────────────────────────────────
+    // ── 7. Dispatch and build response ────────────────────────────────────
+    //
+    // `conn_guard` is held for the entire response lifetime:
+    //   - JSON responses: dropped when this function returns.
+    //   - SSE responses: moved into the stream state and dropped when the
+    //     stream ends (client disconnect or keepalive timeout).
     match message {
         Message::Single(parse_result) => {
             let skip_response = matches!(parse_result, ParseResult::Notification(_));
@@ -170,6 +215,8 @@ pub async fn mcp_post_handler(
                 && rpc_response.result.is_none()
                 && rpc_response.error.is_none()
             {
+                // conn_guard drops here (notification, no persistent connection).
+                let _guard = conn_guard;
                 let mut resp = StatusCode::ACCEPTED.into_response();
                 let h = resp.headers_mut();
                 h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -182,8 +229,11 @@ pub async fn mcp_post_handler(
 
             let json_str = serialize_rpc(&rpc_response);
             if wants_sse {
-                build_sse_response(json_str, state.sse_keepalive_secs)
+                // Guard moves into the SSE stream — released when the stream ends.
+                build_sse_response(json_str, state.sse_keepalive_secs, conn_guard)
             } else {
+                // Guard drops when this function returns (after response is sent).
+                let _guard = conn_guard;
                 build_json_response(StatusCode::OK, json_str)
             }
         }
@@ -200,8 +250,9 @@ pub async fn mcp_post_handler(
             let json_str = serde_json::to_string(&responses)
                 .unwrap_or_else(|_| "[]".to_string());
             if wants_sse {
-                build_sse_response(json_str, state.sse_keepalive_secs)
+                build_sse_response(json_str, state.sse_keepalive_secs, conn_guard)
             } else {
+                let _guard = conn_guard;
                 build_json_response(StatusCode::OK, json_str)
             }
         }
@@ -305,21 +356,31 @@ fn build_json_response(status: StatusCode, body: String) -> Response {
 ///
 /// Set `keepalive_secs = 0` in tests to avoid any sleep and allow body
 /// collection to complete immediately after the first event.
-fn build_sse_response(json_str: String, keepalive_secs: u64) -> Response {
+///
+/// `guard` is moved into the stream state and released when the stream ends
+/// (either after the keepalive timeout or when the client disconnects).
+fn build_sse_response(
+    json_str: String,
+    keepalive_secs: u64,
+    guard: ConnectionGuard,
+) -> Response {
     // State machine: Some(data) → yield event, transition to None(secs).
     //                None       → sleep keepalive_secs, then end stream.
+    // The guard lives in the state tuple for the full stream lifetime.
     let sse_stream = stream::unfold(
-        (Some(json_str), keepalive_secs),
-        |(data_opt, secs)| async move {
+        (Some(json_str), keepalive_secs, guard),
+        |(data_opt, secs, guard)| async move {
             match data_opt {
                 Some(data) => {
                     let event = Event::default().data(data);
-                    Some((Ok::<Event, Infallible>(event), (None, secs)))
+                    Some((Ok::<Event, Infallible>(event), (None, secs, guard)))
                 }
                 None => {
                     if secs > 0 {
                         tokio::time::sleep(Duration::from_secs(secs)).await;
                     }
+                    // Stream ends; guard drops here, decrementing connection count.
+                    drop(guard);
                     None
                 }
             }
@@ -415,6 +476,7 @@ mod tests {
             config_version: 1,
             token_hash,
             token_prefix: None,
+            max_connections: 50,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
@@ -443,6 +505,7 @@ mod tests {
         config: Arc<ServerConfig>,
         sse_keepalive_secs: u64,
     ) -> Arc<TransportState> {
+        use crate::connections::ConnectionTracker;
         let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test_transport").unwrap();
         let cache = Arc::new(ConfigCache::new(pool));
         cache.upsert(Arc::clone(&config));
@@ -465,6 +528,7 @@ mod tests {
             cache,
             validator: Arc::new(TokenValidator::new()),
             router,
+            connection_tracker: ConnectionTracker::new(10_000),
             sse_keepalive_secs,
         })
     }
@@ -623,6 +687,7 @@ mod tests {
             config_version: 1,
             token_hash: None,  // no auth for simplicity
             token_prefix: None,
+            max_connections: 50,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         });
@@ -648,6 +713,7 @@ mod tests {
             cache,
             validator: Arc::new(TokenValidator::new()),
             router: mcp_router,
+            connection_tracker: crate::connections::ConnectionTracker::new(10_000),
             sse_keepalive_secs: 0,
         });
 
@@ -1149,5 +1215,122 @@ mod tests {
                 "tools/call result must have a content array; got: {json}"
             );
         }
+    }
+
+    // ── Connection-limit tests ────────────────────────────────────────────────
+
+    /// Build a `TransportState` with a pre-populated cache and custom `ConnectionTracker`.
+    fn make_state_with_tracker(
+        config: Arc<ServerConfig>,
+        tracker: Arc<crate::connections::ConnectionTracker>,
+    ) -> Arc<TransportState> {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://localhost/test_conn_limit").unwrap();
+        let cache = Arc::new(ConfigCache::new(pool));
+        cache.upsert(Arc::clone(&config));
+
+        let sidecar_pool = SidecarPool::new(PathBuf::from("/nonexistent/sidecar.sock"));
+        let circuit_registry = CircuitBreakerRegistry::new();
+        let http_client = reqwest::Client::new();
+        let executor = Arc::new(UpstreamExecutor::new(
+            sidecar_pool,
+            http_client,
+            circuit_registry,
+        ));
+        let request_builder = UpstreamRequestBuilder::with_allow_http(true);
+        let upstream = UpstreamPipeline::new(executor, request_builder);
+
+        let logger = RequestLogger::new(Uuid::new_v4().to_string(), LogLevel::Info);
+        let router = Arc::new(McpRouter::new(Arc::clone(&cache), upstream, logger));
+
+        Arc::new(TransportState {
+            cache,
+            validator: Arc::new(TokenValidator::new()),
+            router,
+            connection_tracker: tracker,
+            sse_keepalive_secs: 0,
+        })
+    }
+
+    /// A request that goes past auth but has `max_connections = 0` (always 503).
+    #[tokio::test]
+    async fn server_at_capacity_returns_503_with_retry_after() {
+        use crate::auth::generate_token;
+        use crate::connections::ConnectionTracker;
+
+        // Auth must pass before the connection-limit check runs.
+        let (raw, hash) = generate_token().expect("generate_token");
+        let config = Arc::new({
+            let mut c = Arc::unwrap_or_clone(make_server_config(
+                "Cap Test",
+                "cap-test",
+                simple_config_json("http://localhost"),
+                Some(hash),
+            ));
+            c.max_connections = 0; // always refuse — limit hit immediately
+            c
+        });
+
+        // Global limit is generous; per-server limit of 0 should trigger 503.
+        let tracker = ConnectionTracker::new(10_000);
+        let state = make_state_with_tracker(config, tracker);
+        let app = build_transport_router(state);
+
+        let auth = format!("Bearer {raw}");
+        let req = make_post(
+            "cap-test",
+            json!({"jsonrpc":"2.0","method":"ping","id":1}),
+            Some(&auth),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "must return 503 when per-server connection limit is exhausted"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+            "Retry-After: 1 must be present on 503 capacity response"
+        );
+
+        // Body must be a JSON-RPC error envelope (not HTML).
+        let body = to_bytes(resp.into_body(), 4_096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], -32005, "error code must be -32005");
+        assert!(
+            json["error"]["message"].as_str().is_some(),
+            "error message must be present"
+        );
+    }
+
+    /// Global limit of 0 also triggers 503.
+    #[tokio::test]
+    async fn global_capacity_returns_503() {
+        use crate::auth::generate_token;
+        use crate::connections::ConnectionTracker;
+
+        let (raw, hash) = generate_token().expect("generate_token");
+        let config = make_server_config(
+            "Global Cap",
+            "global-cap",
+            simple_config_json("http://localhost"),
+            Some(hash),
+        );
+
+        let tracker = ConnectionTracker::new(0); // global limit of zero
+        let state = make_state_with_tracker(config, tracker);
+        let app = build_transport_router(state);
+
+        let auth = format!("Bearer {raw}");
+        let req = make_post(
+            "global-cap",
+            json!({"jsonrpc":"2.0","method":"ping","id":1}),
+            Some(&auth),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
