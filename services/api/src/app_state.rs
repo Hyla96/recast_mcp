@@ -1,8 +1,24 @@
 //! Shared application state threaded through all axum handlers.
 
 use crate::{auth::JwksCache, config::ApiConfig, credentials::CredentialService, servers::ServerService};
+use mcp_common::AppError;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+
 use mcp_common::AuditLogger;
-use std::sync::Arc;
+
+// ── SSRF validator type ───────────────────────────────────────────────────────
+
+/// The `Future` type returned by an SSRF validator function.
+pub type SsrfValidatorFuture = Pin<Box<dyn Future<Output = Result<(), AppError>> + Send>>;
+
+/// An async SSRF validation function.
+///
+/// In production: wraps [`mcp_common::validate_url_with_dns`].
+/// In tests: use a passthrough (`Arc::new(|_| Box::pin(async { Ok(()) }))`) to allow
+/// requests to `127.0.0.1` mock servers.
+pub type SsrfValidatorFn = Arc<dyn Fn(url::Url) -> SsrfValidatorFuture + Send + Sync>;
+
+// ── AppState ──────────────────────────────────────────────────────────────────
 
 /// Application state available to every request handler via `axum::extract::State<AppState>`.
 ///
@@ -41,4 +57,25 @@ pub struct AppState {
     /// and ownership checks. Cloning is O(1) — the pool and audit logger are
     /// `Arc`-wrapped inside the service.
     pub server_service: ServerService,
+
+    /// Shared `reqwest::Client` for outbound proxy test requests.
+    ///
+    /// Built once at startup with a 10-second TCP connect timeout.
+    /// The per-request timeout is enforced in the proxy handler via
+    /// `tokio::select!` so the handler can distinguish timeouts from
+    /// connectivity errors.
+    pub http_client: reqwest::Client,
+
+    /// Async SSRF validation function for proxy test requests.
+    ///
+    /// Production: wraps `validate_url_with_dns` (Phase 1 + DNS resolution).
+    /// Tests: passthrough (`Arc::new(|_| Box::pin(async { Ok(()) }))`) to allow
+    /// `127.0.0.1` mock servers without triggering SSRF protection.
+    pub ssrf_validator: SsrfValidatorFn,
+
+    /// Maximum duration to wait for the upstream response in proxy test calls.
+    ///
+    /// Default: 30 seconds (production).
+    /// Tests should set a shorter value (e.g. 150 ms) to keep test suites fast.
+    pub proxy_timeout: Duration,
 }

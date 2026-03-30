@@ -33,7 +33,7 @@ use svix::webhooks::Webhook;
 use tower::ServiceExt;
 
 use mcp_api::{
-    app_state::AppState,
+    app_state::{AppState, SsrfValidatorFn},
     auth::JwksCache,
     config::ApiConfig,
     credentials::CredentialService,
@@ -87,7 +87,14 @@ fn make_state(pool: sqlx::PgPool) -> AppState {
         jwks_cache: JwksCache::new("http://localhost/jwks"),
         credential_service,
         server_service,
+        http_client: reqwest::Client::new(),
+        ssrf_validator: passthrough_ssrf_validator(),
+        proxy_timeout: std::time::Duration::from_millis(150),
     }
+}
+
+fn passthrough_ssrf_validator() -> SsrfValidatorFn {
+    Arc::new(|_url: url::Url| Box::pin(async { Ok(()) }))
 }
 
 /// Minimal test router: just the webhook endpoint + request-id middleware.

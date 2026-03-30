@@ -10,6 +10,7 @@ use crate::handlers::credentials::{
     create_credential_handler, delete_credential_handler, list_credentials_handler,
     rotate_credential_handler,
 };
+use crate::handlers::proxy::proxy_test_handler;
 use crate::handlers::servers::{
     create_server_handler, delete_server_handler, get_server_handler, list_servers_handler,
     update_server_handler, validate_url_handler,
@@ -114,6 +115,7 @@ pub(crate) fn build_router_with_timeout(
     // route_layer applies only to the routes in THIS sub-router, so
     // /v1/webhooks/clerk (above) is never touched by clerk_jwt_middleware.
     let v1_protected = Router::new()
+        .route("/v1/proxy/test", axum::routing::post(proxy_test_handler))
         .route("/v1/users/me", get(me_handler))
         // Server CRUD endpoints
         .route(

@@ -17,3 +17,6 @@ pub mod tokens;
 
 /// MCP Server CRUD handlers.
 pub mod servers;
+
+/// Proxy test endpoint — dispatches upstream calls on behalf of the builder UI.
+pub mod proxy;

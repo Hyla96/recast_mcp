@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 
 use mcp_api::{
-    app_state::AppState,
+    app_state::{AppState, SsrfValidatorFn},
     auth::JwksCache,
     config::ApiConfig,
     credentials::CredentialService,
@@ -126,10 +126,21 @@ pub fn make_jwt_with_offset(sub: &str, email: &str, exp_offset_secs: i64) -> Str
 
 // ── AppState builder ──────────────────────────────────────────────────────────
 
+/// Returns a passthrough SSRF validator that always returns `Ok(())`.
+///
+/// Required in integration tests where the proxy target is `127.0.0.1`
+/// (MockUpstream), which would otherwise be blocked by the real SSRF check.
+pub fn passthrough_ssrf_validator() -> SsrfValidatorFn {
+    Arc::new(|_url: url::Url| Box::pin(async { Ok(()) }))
+}
+
 /// Starts a `MockUpstream` serving the shared JWKS and builds an `AppState`.
 ///
 /// The returned `MockUpstream` must be kept alive for the duration of the test —
 /// dropping it shuts down the stub HTTP server.
+///
+/// Uses a passthrough SSRF validator (allowing `127.0.0.1`) and a 150 ms
+/// proxy timeout so proxy test scenarios complete quickly.
 pub async fn make_state_with_jwks(pool: sqlx::PgPool) -> (AppState, MockUpstream) {
     let key = test_key();
     let mock = MockUpstream::start().await;
@@ -146,6 +157,11 @@ pub async fn make_state_with_jwks(pool: sqlx::PgPool) -> (AppState, MockUpstream
         audit_logger.clone(),
         "https://mcp.test.example.com".to_string(),
     );
+
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .build()
+        .expect("test HTTP client");
 
     let state = AppState {
         pool: pool.clone(),
@@ -165,6 +181,9 @@ pub async fn make_state_with_jwks(pool: sqlx::PgPool) -> (AppState, MockUpstream
         jwks_cache: JwksCache::new(&jwks_url),
         credential_service,
         server_service,
+        http_client,
+        ssrf_validator: passthrough_ssrf_validator(),
+        proxy_timeout: std::time::Duration::from_millis(150),
     };
 
     (state, mock)

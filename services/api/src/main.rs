@@ -6,7 +6,7 @@
 
 // Module declarations live in lib.rs so integration tests can import them.
 // The binary imports everything from the lib crate (same package).
-use mcp_api::app_state::AppState;
+use mcp_api::app_state::{AppState, SsrfValidatorFn};
 use mcp_api::auth::JwksCache;
 use mcp_api::config::ApiConfig;
 use mcp_api::credentials::CredentialService;
@@ -14,7 +14,7 @@ use mcp_api::router::build_router;
 use mcp_api::servers::ServerService;
 use mcp_api::shutdown::shutdown_signal;
 
-use mcp_common::{init_telemetry, AuditLogger, FromEnv};
+use mcp_common::{init_telemetry, validate_url_with_dns, AuditLogger, FromEnv};
 use mcp_crypto::CryptoKey;
 use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -95,6 +95,26 @@ async fn main() {
         cfg.gateway_base_url.clone(),
     );
 
+    // Shared HTTP client for outbound proxy test requests.
+    // TCP connect timeout: 10 s. Per-request read timeout is enforced in the
+    // proxy handler via tokio::select! so timeouts are distinguishable from
+    // connectivity errors.
+    let http_client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("failed to build HTTP client: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Production SSRF validator: Phase 1 blocklist + async DNS resolution.
+    let ssrf_validator: SsrfValidatorFn = Arc::new(|url: url::Url| {
+        Box::pin(async move { validate_url_with_dns(&url).await })
+    });
+
     let state = AppState {
         pool: pool.clone(),
         config: Arc::new(cfg),
@@ -102,6 +122,9 @@ async fn main() {
         jwks_cache,
         credential_service,
         server_service,
+        http_client,
+        ssrf_validator,
+        proxy_timeout: Duration::from_secs(30),
     };
 
     let app = build_router(state, prom_handle);

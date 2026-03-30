@@ -81,6 +81,9 @@ fn make_state(pool: sqlx::PgPool, jwks_url: &str) -> AppState {
         jwks_cache: JwksCache::new(jwks_url),
         credential_service,
         server_service,
+        http_client: reqwest::Client::new(),
+        ssrf_validator: helpers::passthrough_ssrf_validator(),
+        proxy_timeout: std::time::Duration::from_millis(150),
     }
 }
 

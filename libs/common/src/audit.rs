@@ -103,6 +103,10 @@ pub enum AuditAction {
     ServerTokenGenerate,
     /// A server access token was revoked.
     ServerTokenRevoke,
+
+    // ── Proxy ─────────────────────────────────────────────────────────────────
+    /// A builder proxy test call was dispatched on behalf of a user.
+    ProxyTest,
 }
 
 impl AuditAction {
@@ -124,6 +128,7 @@ impl AuditAction {
             Self::ServerDelete => "server_delete",
             Self::ServerTokenGenerate => "server_token_generate",
             Self::ServerTokenRevoke => "server_token_revoke",
+            Self::ProxyTest => "proxy_test",
         }
     }
 }
