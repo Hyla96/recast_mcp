@@ -14,6 +14,7 @@ import { StepIndicator } from '@components/builder/StepIndicator';
 import { UrlStep } from '@components/builder/UrlStep';
 import { AuthStep } from '@components/builder/AuthStep';
 import { TestStep } from '@components/builder/TestStep';
+import { MappingStep } from '@components/builder/MappingStep';
 
 // ── Step metadata ─────────────────────────────────────────────────────────────
 
@@ -90,6 +91,16 @@ export function NewServerPage() {
         );
 
       case 'mapping':
+        return (
+          <MappingStep
+            onContinue={handleContinue}
+            onBack={() => {
+              const prev = STEPS[currentIndex - 1];
+              if (prev !== undefined) setCurrentStage(prev.id);
+            }}
+          />
+        );
+
       case 'naming':
       case 'review':
         return (
@@ -121,7 +132,7 @@ export function NewServerPage() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto space-y-32">
+    <div className={`${currentStage === 'mapping' ? 'max-w-5xl' : 'max-w-2xl'} mx-auto space-y-32`}>
       <div>
         <h1 className="text-2xl font-medium text-text-primary">New MCP Server</h1>
         <p className="mt-8 text-sm text-text-secondary">

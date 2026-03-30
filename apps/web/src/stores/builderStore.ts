@@ -124,6 +124,7 @@ export interface BuilderState {
   addSelectedField: (field: SelectedField) => void;
   removeSelectedField: (jsonPath: string) => void;
   reorderSelectedFields: (fields: SelectedField[]) => void;
+  clearSelectedFields: () => void;
   updateFieldName: (jsonPath: string, name: string) => void;
 
   setToolName: (name: string) => void;
@@ -313,6 +314,11 @@ export const useBuilderStore = create<BuilderState>()(
     reorderSelectedFields: (fields) =>
       set((state) => {
         state.mappingSlice.selectedFields = fields;
+      }),
+
+    clearSelectedFields: () =>
+      set((state) => {
+        state.mappingSlice.selectedFields = [];
       }),
 
     updateFieldName: (jsonPath, name) =>
