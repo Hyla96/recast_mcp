@@ -13,6 +13,7 @@ import type { BuilderStage } from '@stores/builderStore';
 import { StepIndicator } from '@components/builder/StepIndicator';
 import { UrlStep } from '@components/builder/UrlStep';
 import { AuthStep } from '@components/builder/AuthStep';
+import { TestStep } from '@components/builder/TestStep';
 
 // ── Step metadata ─────────────────────────────────────────────────────────────
 
@@ -78,6 +79,16 @@ export function NewServerPage() {
         );
 
       case 'test':
+        return (
+          <TestStep
+            onContinue={handleContinue}
+            onBack={() => {
+              const prev = STEPS[currentIndex - 1];
+              if (prev !== undefined) setCurrentStage(prev.id);
+            }}
+          />
+        );
+
       case 'mapping':
       case 'naming':
       case 'review':
