@@ -28,8 +28,9 @@
 | S-049 | Array path normalization | 5 | P1 |
 | S-050 | Tool naming and description form | 3 | P0 |
 | S-051 | Request body builder (POST/PUT/PATCH) | 5 | P1 |
+| S-052 | Proxy test endpoint (Platform API) | 5 | P0 |
 
-**Epic total:** 68 points
+**Epic total:** 73 points
 
 ---
 
@@ -658,3 +659,108 @@ As a user integrating with a POST, PUT, or PATCH API endpoint, I want to define 
 - The complete tool input schema (path params + query params + body template vars) is assembled in a selector `useToolInputSchema()` that reads from `builderStore` and returns a `ToolParameter[]` array. This selector is the single source of truth for the MCP tool's `inputSchema` used in the deploy review step (EPIC-04).
 - JSON validation and line-number extraction use the shared `parseJsonWithLineNumbers()` utility from `src/lib/jsonValidator.ts` (same as S-046). Do not reimplement.
 - The textarea uses an uncontrolled pattern (same as S-046) for consistency and performance. Line numbers are re-rendered via a `requestAnimationFrame` callback tied to the textarea's `scroll` and `input` events.
+
+---
+
+## S-052: Proxy Test Endpoint (Platform API)
+
+**Story ID:** S-052
+**Title:** Proxy test endpoint (Platform API)
+**Priority:** P0
+**Estimated Effort:** 5 points
+**Dependencies:** S-010 (Platform API scaffolding), S-014 (SSRF protection), S-015 (audit logging), S-045 (frontend test call — specifies the request/response contract)
+
+### Description
+
+As the builder frontend (S-045), I need a `POST /v1/proxy/test` endpoint on the Platform API that receives the user's configured URL, HTTP method, parameters, auth credentials, and optional request body, executes the upstream HTTP call server-side, and returns the upstream response — so that the frontend never touches the upstream API directly and credentials are never exposed to the browser.
+
+This endpoint is the server-side half of the test call flow. It is a synchronous passthrough proxy for the duration of the builder test experience, and is the only point where user-supplied credentials travel outside the browser.
+
+### Acceptance Criteria
+
+1. `POST /v1/proxy/test` is mounted on the Platform API (`services/api`) behind the existing Clerk JWT auth middleware. Unauthenticated requests return `401`.
+
+2. Request body (JSON, `Content-Type: application/json`):
+   ```json
+   {
+     "url": "https://api.example.com/users/{userId}",
+     "method": "GET",
+     "path_params": { "userId": "123" },
+     "query_params": { "format": "json" },
+     "auth": {
+       "type": "none | bearer | api_key | basic",
+       "bearer_token": "...",
+       "api_key_name": "X-API-Key",
+       "api_key_value": "...",
+       "api_key_placement": "header | query",
+       "basic_username": "...",
+       "basic_password": "..."
+     },
+     "body": "{\"key\": \"value\"}"
+   }
+   ```
+   Fields not relevant to the selected auth type may be omitted. `body` is only present for POST/PUT/PATCH methods. The endpoint uses `#[serde(deny_unknown_fields)]` on the auth sub-struct but NOT on the top-level struct (forward compatibility).
+
+3. **URL construction:** substitute path params into the URL (replace `{name}` with the provided value, URL-encoded). Append query params as a query string. The final constructed URL is validated with `validate_url_with_dns` (S-014) before the upstream request is dispatched. An SSRF-blocked URL returns `422 Unprocessable Entity` with `{ "error": { "code": "ssrf_blocked", "message": "The URL resolves to a disallowed address." } }`.
+
+4. **Auth injection:** build the upstream `reqwest` request and inject credentials according to `auth.type`:
+   - `none`: no modifications.
+   - `bearer`: add `Authorization: Bearer {token}` header.
+   - `api_key` + `header`: add `{api_key_name}: {api_key_value}` header.
+   - `api_key` + `query`: append `{api_key_name}={api_key_value}` to the query string (after SSRF validation — does not affect the validated URL).
+   - `basic`: add `Authorization: Basic {base64(username:password)}` header.
+
+5. **Upstream request:** dispatch via `reqwest`. The request carries the constructed URL, the specified HTTP method, injected auth, and (if present) the `body` string as the request body with `Content-Type: application/json`. The client timeout is 30 seconds. The `User-Agent` header is set to `recast-mcp-proxy/1.0`.
+
+6. **Response passthrough:** read the upstream response status code and body (up to 100 KB; truncate with a warning header `X-Recast-Truncated: true` if over limit). Parse the body as JSON. Return to the frontend:
+   ```json
+   {
+     "status": 200,
+     "headers": { "content-type": "application/json" },
+     "body": { ... }
+   }
+   ```
+   If the body cannot be parsed as JSON, return it as a string under `"body_raw"` with `"body": null`. Include only safe headers in the response (omit `Set-Cookie`, `Authorization`, `WWW-Authenticate`).
+
+7. **Timeout:** if the upstream request times out (30 s), return `200 OK` to the frontend with:
+   ```json
+   { "outcome": "timeout" }
+   ```
+   Do not return a `5xx` to the frontend for upstream timeouts — the platform itself succeeded; the upstream did not respond.
+
+8. **Connectivity error:** if `reqwest` returns a connection error (DNS failure, refused, TLS error), return `200 OK` to the frontend with:
+   ```json
+   { "outcome": "connectivity_error", "host": "<hostname extracted from URL>" }
+   ```
+
+9. **Client disconnect propagation:** if the client closes the connection before the upstream responds, abort the in-flight `reqwest` request. Implement via `tokio::select!` on the upstream future and a `futures::future::AbortHandle` tied to axum's request cancellation signal (available via `axum::extract::ConnectInfo` or a `tower` layer watching for connection close).
+
+10. **Credential redaction:** credentials (`bearer_token`, `api_key_value`, `basic_password`) must never appear in logs, traces, or error responses. Use `tracing::field::Empty` for credential fields; redact before passing to any log macro or `AppError` message.
+
+11. **Audit log:** emit one `audit_log` row per call: `action = "proxy_test"`, `actor_id = <clerk user id>`, `metadata = { "url_host": "<hostname>", "method": "<method>", "auth_type": "<type>", "status": <upstream_status_or_null> }`. Never include credentials or full URL in audit metadata.
+
+12. **Input validation:**
+    - `url` must be a valid URL with `http` or `https` scheme. Invalid URL returns `422` with `code: "invalid_url"`.
+    - `method` must be one of `GET POST PUT DELETE PATCH`. Invalid method returns `422`.
+    - `path_params` and `query_params` values must be strings. Max 50 params combined.
+    - `body` max size 100 KB. Oversized body returns `422` with `code: "body_too_large"`.
+    - Auth fields are only validated for presence when relevant to the selected `auth.type` (e.g., `bearer_token` required when `type = "bearer"`). Missing required auth fields return `422` with `code: "missing_auth_field"`.
+
+13. Integration tests (using `TestDatabase` + `MockUpstream` from `mcp_common::testing`):
+    - Happy path: `MockUpstream` returns `200` with a JSON body; endpoint returns `{ "status": 200, "body": {...} }`.
+    - Auth injection: verify `MockUpstream` receives the correct `Authorization` header for bearer, api-key (header), and basic.
+    - SSRF block: URL pointing to `127.0.0.1` returns `422 ssrf_blocked`.
+    - Timeout: `MockUpstream` delays > 30 s (mock with a sleep); endpoint returns `{ "outcome": "timeout" }` within 31 s.
+    - Connectivity error: unresolvable hostname returns `{ "outcome": "connectivity_error" }`.
+    - Unauthenticated: no JWT returns `401`.
+    - Body truncation: `MockUpstream` returns > 100 KB body; response includes `X-Recast-Truncated: true`.
+
+### Technical Notes
+
+- Route: `POST /v1/proxy/test`. No path parameters on the route itself.
+- The endpoint must NOT be behind a `tower::timeout` layer shorter than 31 seconds — the 30 s upstream timeout must be allowed to elapse so the endpoint can return `{ "outcome": "timeout" }` cleanly rather than being cut off by an outer middleware timeout.
+- Use a dedicated `reqwest::Client` instance with `timeout(Duration::from_secs(30))`, `pool_max_idle_per_host(5)`, and `danger_accept_invalid_certs(false)`. Initialize it once in `AppState` and share via `Arc`.
+- `validate_url_with_dns` is called with the fully constructed URL (after path param substitution) so SSRF validation covers the real target, not the template.
+- API-key-in-query injection happens AFTER SSRF validation — the key is appended to the already-validated URL object without re-triggering DNS. Use `url.query_pairs_mut()` from the `url` crate to append safely.
+- Credential redaction: define a `RedactedAuth` newtype that implements `Debug` with all sensitive fields replaced by `"[REDACTED]"`. Use it in `tracing::debug!` spans.
+- The 100 KB body cap uses `response.bytes_with_limit(100 * 1024)` from reqwest (or `.take(100 * 1024)` on the response byte stream). If the response is larger, set the `X-Recast-Truncated: true` header on the platform's response to the frontend and return only the truncated bytes (attempting JSON parse on the truncated slice may fail; fall back to `body_raw` in that case).
