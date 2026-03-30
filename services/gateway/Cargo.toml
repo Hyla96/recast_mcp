@@ -43,7 +43,7 @@ mcp-protocol = { path = "../../libs/mcp-protocol" }
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 hex = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 scopeguard = "1"
 

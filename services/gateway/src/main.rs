@@ -11,6 +11,7 @@ pub mod protocol;
 pub mod router;
 pub mod shutdown;
 pub mod sidecar;
+pub mod sse;
 pub mod tool_schema;
 pub mod transform;
 pub mod transport;
@@ -41,6 +42,7 @@ use std::{
     time::Instant,
 };
 use tower_http::trace::TraceLayer;
+use sse::{build_sse_router, spawn_session_sweeper, SessionRegistry, SseFallbackState};
 use transport::{build_transport_router, TransportState};
 use upstream::UpstreamRequestBuilder;
 use uuid::Uuid;
@@ -152,12 +154,29 @@ async fn main() {
     let validator = Arc::new(TokenValidator::new());
     let transport_state = TransportState::new(
         Arc::clone(&cache),
-        validator,
-        mcp_router,
+        Arc::clone(&validator),
+        Arc::clone(&mcp_router),
         Arc::clone(&connection_tracker),
         Arc::clone(&is_shutting_down),
     );
     let mcp_transport = build_transport_router(transport_state);
+
+    // ── Build SSE fallback transport ──────────────────────────────────────────
+    //
+    // Legacy two-endpoint SSE transport for clients that do not support
+    // Streamable HTTP (e.g. older Claude Desktop).
+    let sse_registry = SessionRegistry::new();
+    // Sweep idle sessions every 30 seconds.
+    let _sweeper_handle = spawn_session_sweeper(Arc::clone(&sse_registry));
+    let sse_state = SseFallbackState::new(
+        Arc::clone(&cache),
+        validator,
+        mcp_router,
+        Arc::clone(&connection_tracker),
+        sse_registry,
+        Arc::clone(&is_shutting_down),
+    );
+    let sse_transport = build_sse_router(sse_state);
 
     // Wrap the db checker so `/health/ready` returns 503 during the LB drain
     // window, signalling the load balancer to stop routing new traffic here.
@@ -186,7 +205,8 @@ async fn main() {
     let app = Router::new()
         .merge(health_router)
         .merge(api_router)
-        .merge(mcp_transport);
+        .merge(mcp_transport)
+        .merge(sse_transport);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     tracing::info!("listening on {}", addr);
