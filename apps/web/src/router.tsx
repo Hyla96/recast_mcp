@@ -1,5 +1,6 @@
 import { createBrowserRouter } from 'react-router-dom';
 import { AppShell } from '@components/layout/AppShell';
+import { AuthGuard } from '@components/auth/AuthGuard';
 import { HomePage } from '@/pages/HomePage';
 import { LoginPage } from '@/pages/LoginPage';
 import { DashboardPage } from '@/pages/DashboardPage';
@@ -19,10 +20,13 @@ export const router = createBrowserRouter([
     element: <LoginPage />,
   },
 
-  // Authenticated routes — wrapped in AppShell
-  // Auth guard (RedirectToSignIn) added in TASK-002
+  // Authenticated routes — wrapped in AppShell + AuthGuard
   {
-    element: <AppShell />,
+    element: (
+      <AuthGuard>
+        <AppShell />
+      </AuthGuard>
+    ),
     children: [
       {
         path: '/dashboard',

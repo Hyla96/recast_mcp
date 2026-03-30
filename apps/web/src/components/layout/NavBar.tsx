@@ -1,8 +1,50 @@
-import { Link } from 'react-router-dom';
+import { useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth, useUser } from '@clerk/clerk-react';
 import { useUiStore } from '@stores/uiStore';
 
 export function NavBar() {
   const { theme, toggleTheme } = useUiStore();
+  const { isLoaded: authLoaded, isSignedIn, signOut } = useAuth();
+  const { isLoaded: userLoaded, user } = useUser();
+  const navigate = useNavigate();
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const displayName =
+    userLoaded && user !== null && user !== undefined
+      ? (user.fullName ?? user.primaryEmailAddress?.emailAddress ?? 'User')
+      : null;
+
+  const email =
+    userLoaded && user !== null && user !== undefined
+      ? (user.primaryEmailAddress?.emailAddress ?? null)
+      : null;
+
+  // Initials fallback: first letter of first name + first letter of last name.
+  const initials =
+    userLoaded && user !== null && user !== undefined
+      ? ((user.firstName?.[0] ?? '') + (user.lastName?.[0] ?? '')).toUpperCase() || 'U'
+      : 'U';
+
+  const avatarUrl =
+    userLoaded && user !== null && user !== undefined ? (user.imageUrl ?? null) : null;
+
+  async function handleSignOut() {
+    setMenuOpen(false);
+    await signOut();
+    void navigate('/login', { replace: true });
+  }
+
+  // Close menu on outside click.
+  function handleMenuKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Escape') {
+      setMenuOpen(false);
+    }
+  }
+
+  const showUserMenu = authLoaded && isSignedIn;
 
   return (
     <header className="fixed top-0 inset-x-0 z-fixed h-48 bg-surface-container-low flex items-center px-24">
@@ -33,10 +75,62 @@ export function NavBar() {
           )}
         </button>
 
-        {/* User menu placeholder — replaced by Clerk UserButton in TASK-002 */}
-        <div className="w-32 h-32 rounded-full bg-surface-container-highest flex items-center justify-center text-sm font-medium text-text-secondary">
-          U
-        </div>
+        {/* User menu — only shown when authenticated */}
+        {showUserMenu ? (
+          <div className="relative" ref={menuRef} onKeyDown={handleMenuKeyDown}>
+            <button
+              type="button"
+              onClick={() => setMenuOpen((prev) => !prev)}
+              aria-label="Open user menu"
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              className="flex items-center gap-8 rounded-full focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-surface-container-low"
+            >
+              {avatarUrl !== null ? (
+                <img
+                  src={avatarUrl}
+                  alt={displayName ?? 'User avatar'}
+                  className="w-32 h-32 rounded-full object-cover"
+                />
+              ) : (
+                <span className="w-32 h-32 rounded-full bg-primary-container text-primary flex items-center justify-center text-xs font-semibold select-none">
+                  {initials}
+                </span>
+              )}
+            </button>
+
+            {menuOpen && (
+              <div
+                role="menu"
+                aria-label="User menu"
+                className="absolute right-0 mt-8 w-200 rounded-md bg-surface-container-low border border-border-subtle shadow-modal py-8 z-dropdown"
+              >
+                {/* User info header */}
+                <div className="px-16 py-12 border-b border-border-subtle">
+                  <p className="text-sm font-medium text-text-primary truncate">
+                    {displayName ?? '—'}
+                  </p>
+                  {email !== null && (
+                    <p className="text-xs text-text-secondary truncate mt-2">{email}</p>
+                  )}
+                </div>
+
+                {/* Sign out */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => void handleSignOut()}
+                  className="w-full text-left px-16 py-10 text-sm text-text-primary hover:bg-surface-container-highest transition-colors"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Skeleton placeholder while auth loads */
+          <div className="w-32 h-32 rounded-full bg-surface-container-highest animate-pulse" />
+        )}
       </div>
     </header>
   );

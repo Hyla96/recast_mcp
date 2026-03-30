@@ -1,31 +1,55 @@
-import { Link } from 'react-router-dom';
-
 /**
- * LoginPage — placeholder shell.
- * Clerk <SignIn> / <SignUp> integration added in TASK-002.
+ * LoginPage — Clerk-powered sign-in / sign-up.
+ *
+ * URL query param `mode`:
+ *   - absent or "signin" → renders <SignIn>
+ *   - "signup"           → renders <SignUp>
+ *
+ * Already-authenticated users are immediately redirected to /dashboard.
  */
+
+import { SignIn, SignUp, useAuth } from '@clerk/clerk-react';
+import { useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useUiStore } from '@stores/uiStore';
+import { buildClerkAppearance } from '@/lib/clerkAppearance';
+
 export function LoginPage() {
+  const { isLoaded, isSignedIn } = useAuth();
+  const { theme } = useUiStore();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  const mode = searchParams.get('mode');
+  const showSignUp = mode === 'signup';
+  // Preserve intended destination for post-auth redirect.
+  const redirectUrl = searchParams.get('redirect_url') ?? '/dashboard';
+
+  // Redirect already-authenticated users immediately.
+  useEffect(() => {
+    if (isLoaded && isSignedIn) {
+      void navigate(redirectUrl, { replace: true });
+    }
+  }, [isLoaded, isSignedIn, navigate, redirectUrl]);
+
+  const appearance = buildClerkAppearance(theme);
+
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center px-16">
+    <div className="min-h-screen bg-surface flex items-center justify-center px-16 py-32">
       <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-medium text-text-primary mb-32 text-center">
-          Sign in to Recast MCP
-        </h1>
-        {/* Clerk SignIn component will be rendered here (TASK-002) */}
-        <div className="rounded-md bg-surface-container-low p-32 text-center text-sm text-text-secondary">
-          Authentication coming in TASK-002
-        </div>
-        <p className="mt-24 text-center text-sm text-text-secondary">
-          Don't have an account?{' '}
-          <Link to="/login?mode=signup" className="text-secondary underline">
-            Create one
-          </Link>
-        </p>
-        <p className="mt-16 text-center text-sm">
-          <Link to="/dashboard" className="text-text-secondary underline">
-            Continue to dashboard
-          </Link>
-        </p>
+        {showSignUp ? (
+          <SignUp
+            appearance={appearance}
+            redirectUrl={redirectUrl}
+            signInUrl="/login"
+          />
+        ) : (
+          <SignIn
+            appearance={appearance}
+            redirectUrl={redirectUrl}
+            signUpUrl="/login?mode=signup"
+          />
+        )}
       </div>
     </div>
   );
