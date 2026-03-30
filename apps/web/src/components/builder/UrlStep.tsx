@@ -6,13 +6,14 @@
  * the Zustand builderStore.urlSlice.
  */
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import type { ChangeEvent } from 'react';
 import { useBuilderStore } from '@stores/builderStore';
 import type { HttpMethod, ParamType } from '@stores/builderStore';
 import { useDebounce } from '@hooks/useDebounce';
 import { parseRestUrl } from '@/lib/urlParser';
 import type { ParsedUrl, UrlErrorCode } from '@/lib/urlParser';
+import { RequestBodyBuilder } from '@components/builder/RequestBodyBuilder';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,9 @@ const ERROR_MESSAGES: Record<UrlErrorCode, string> = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
+// HTTP methods that send a request body.
+const BODY_METHODS = new Set<HttpMethod>(['POST', 'PUT', 'PATCH']);
+
 export function UrlStep({ onContinue }: { onContinue: () => void }) {
   const url = useBuilderStore((s) => s.urlSlice.url);
   const method = useBuilderStore((s) => s.urlSlice.method);
@@ -42,6 +46,15 @@ export function UrlStep({ onContinue }: { onContinue: () => void }) {
   const setPathParams = useBuilderStore((s) => s.setPathParams);
   const setQueryParams = useBuilderStore((s) => s.setQueryParams);
   const setUrlValid = useBuilderStore((s) => s.setUrlValid);
+
+  // Persists the last body content across method switches so that switching
+  // from POST → GET → POST restores the previously typed body.
+  const savedBodyRef = useRef<string>('');
+
+  // Stable callback for RequestBodyBuilder to report content changes.
+  const handleBodyContentChange = useCallback((content: string) => {
+    savedBodyRef.current = content;
+  }, []);
 
   // Debounce the raw URL input before running the (synchronous but reactive)
   // parser.  150 ms matches the acceptance criteria.
@@ -302,6 +315,14 @@ export function UrlStep({ onContinue }: { onContinue: () => void }) {
             </div>
           )}
         </div>
+      )}
+
+      {/* Request body builder — visible only for body-carrying methods */}
+      {BODY_METHODS.has(method) && (
+        <RequestBodyBuilder
+          initialContent={savedBodyRef.current}
+          onContentChange={handleBodyContentChange}
+        />
       )}
 
       {/* Continue button */}
