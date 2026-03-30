@@ -61,17 +61,18 @@ Run `just` to see all available recipes. Key ones:
 
 | Command | Description |
 |---------|-------------|
-| `make dev` | Start all services with hot reload (cargo-watch + Vite HMR) |
-| `make down` | Stop all containers (volumes preserved) |
-| `make logs` | Tail logs from all services |
-| `make db-migrate` | Run sqlx migrations against localhost:5432 |
-| `make db-reset` | Drop/recreate db, migrate, seed |
+| `just dev` | Start all services with hot reload (cargo-watch + Vite HMR) |
+| `just down` | Stop all containers (volumes preserved) |
+| `just logs` | Tail logs from all services |
+| `just dev-detach` | Start all services in detached mode |
+| `just db-docker-reset` | Drop/recreate db, migrate, seed |
 | `docker compose down -v` | Stop and remove all containers and volumes |
 
-The `make dev` command merges `docker-compose.yml` (base production topology) and
+`just dev` merges `docker-compose.yml` (base production topology) and
 `docker/docker-compose.override.yml` (dev hot-reload overrides with cargo-watch and Vite).
+Migrations run automatically before services start.
 
-Copy `.env.example` → `.env` before running `make dev`. The `.env` file is git-ignored.
+Copy `.env.example` → `.env` before running `just dev`. The `.env` file is git-ignored.
 
 Port map (host):
 - PostgreSQL: `localhost:5432`

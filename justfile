@@ -99,19 +99,35 @@ run-api:
 run-injector:
     cargo run -p recast-credential-injector
 
-# ─── Docker ────────────────────────────────────────────────────────
+# ─── Docker Compose (local dev) ──────────────────────────────────
+
+compose := "docker compose -f docker-compose.yml -f docker/docker-compose.override.yml"
+
+# Start all services with hot reload (migrations run automatically)
+dev:
+    {{compose}} up
+
+# Start all services in detached mode
+dev-detach:
+    {{compose}} up -d
+
+# Stop all containers (volumes preserved)
+down:
+    {{compose}} down
+
+# Tail logs from all running services
+logs:
+    {{compose}} logs -f
 
 # Build all Docker images
 docker-build:
-    docker compose build
+    {{compose}} build
 
-# Start all services via Docker Compose
-docker-up:
-    docker compose up -d
-
-# Stop all services
-docker-down:
-    docker compose down
+# Drop/recreate DB, re-run migrations, seed
+db-docker-reset:
+    {{compose}} exec db psql -U ${POSTGRES_USER:-recast} postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB:-recast_mcp} WITH (FORCE);"
+    {{compose}} exec db psql -U ${POSTGRES_USER:-recast} postgres -c "CREATE DATABASE ${POSTGRES_DB:-recast_mcp};"
+    {{compose}} run --rm db-migrate
 
 # ─── Housekeeping ──────────────────────────────────────────────────
 

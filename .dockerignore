@@ -1,0 +1,12 @@
+target/
+node_modules/
+apps/web/node_modules/
+apps/web/dist/
+.git/
+.env
+.env.*
+!.env.example
+*.log
+docker/
+.woodpecker/
+docs/

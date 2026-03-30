@@ -8,64 +8,89 @@
 #
 # Usage (from repo root):
 #   docker compose -f docker-compose.yml -f docker/docker-compose.override.yml up
-# Or: make dev
+# Or: just dev
 #
 # Note: relative paths in this file are resolved relative to this file's
 # directory (docker/). The project root is referenced as ../ .
 
 services:
+  # ─── Database migrations (runs once, then exits) ───────────────────────────────
+  db-migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev-rust
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-recast}:${POSTGRES_PASSWORD:-recast}@db:5432/${POSTGRES_DB:-recast_mcp}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sqlx migrate run
+    restart: "no"
+
   # ─── Gateway — cargo-watch hot reload ────────────────────────────────────────
   gateway:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.dev-rust
     volumes:
-      - ..:/app
+      - .:/app
       - cargo-target-gateway:/tmp/target-gateway
       - cargo-registry:/usr/local/cargo/registry
     environment:
       CARGO_TARGET_DIR: /tmp/target-gateway
       SQLX_OFFLINE: "true"
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
     # Override the release binary entrypoint with cargo-watch
-    command: cargo watch -q -x "run -p recast-gateway"
+    command: cargo watch -q -x "run -p mcp-gateway"
 
   # ─── Platform API — cargo-watch hot reload ────────────────────────────────────
   api:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.dev-rust
     volumes:
-      - ..:/app
+      - .:/app
       - cargo-target-api:/tmp/target-api
       - cargo-registry:/usr/local/cargo/registry
     environment:
       CARGO_TARGET_DIR: /tmp/target-api
       SQLX_OFFLINE: "true"
-    command: cargo watch -q -x "run -p recast-api"
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    command: cargo watch -q -x "run -p mcp-api"
 
   # ─── Credential Injector — cargo-watch hot reload ────────────────────────────
   credential-injector:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.dev-rust
     volumes:
-      - ..:/app
+      - .:/app
       - cargo-target-injector:/tmp/target-injector
       - cargo-registry:/usr/local/cargo/registry
     environment:
       CARGO_TARGET_DIR: /tmp/target-injector
       SQLX_OFFLINE: "true"
-    command: cargo watch -q -x "run -p recast-credential-injector"
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    command: cargo watch -q -x "run -p mcp-credential-injector"
 
   # ─── React frontend — Vite dev server with HMR (port 5173) ───────────────────
   web:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.dev-web
     ports:
       - "5173:5173"
     volumes:
-      - ../apps/web:/app
+      - ./apps/web:/app
       - web-node-modules:/app/node_modules
     environment:
       VITE_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}

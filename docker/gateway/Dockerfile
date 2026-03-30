@@ -16,10 +16,10 @@
 #   docker run --env-file .env -p 3000:3000 mcp-gateway:latest
 
 # ─── Stage 1: cargo-chef installer ──────────────────────────────────
-FROM rust:1.85-slim AS chef
+FROM rust:1.88-slim AS chef
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cargo-chef --locked
 
